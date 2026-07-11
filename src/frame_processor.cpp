@@ -251,7 +251,10 @@ void FrameProcessor::process_loop() {
                                 osd_snap.stride_px, osd_snap.height,
                                 RK_FORMAT_BGRA_8888);
                             imcvtcolor(nv12, bgra, RK_FORMAT_YCbCr_420_SP, RK_FORMAT_BGRA_8888);
-                            imblend(osd_rga, bgra, IM_ALPHA_BLEND_SRC_OVER);
+                            // OSD (osd_rga) is straight-alpha from LVGL; PRE_MUL makes RGA
+                            // premultiply it before the SRC_OVER blend, so coloured
+                            // semi-transparent pixels composite correctly.
+                            imblend(osd_rga, bgra, IM_ALPHA_BLEND_SRC_OVER | IM_ALPHA_BLEND_PRE_MUL);
                             imcvtcolor(bgra, nv12, RK_FORMAT_BGRA_8888, RK_FORMAT_YCbCr_420_SP);
                         }
                     }
