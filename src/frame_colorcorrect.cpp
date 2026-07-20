@@ -194,12 +194,20 @@ bool FrameColorCorrect::create_targets() {
     for (int i = 0; i < kTargets; i++) {
         Target& t = targets_[i];
 
+        // This target is never scanned out via KMS -- it's an intermediate
+        // GPU render target that RGA reads back via wrapbuffer_fd_t(), which
+        // assumes a plain linear raster layout with no modifier awareness.
+        // GBM_BO_USE_SCANOUT hints the allocator toward a scanout-optimized
+        // (potentially tiled/compressed) layout; GBM_BO_USE_LINEAR forces the
+        // layout RGA actually expects.
         t.bo = gbm_bo_create(gbm_, width_, height_, GBM_FORMAT_ARGB8888,
-                             GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT);
+                             GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
         if (!t.bo) {
             spdlog::error("FrameCC: gbm_bo_create failed for target {}", i);
             return false;
         }
+        spdlog::info("FrameCC: target {} bo stride={} modifier=0x{:x}", i,
+                     gbm_bo_get_stride(t.bo), gbm_bo_get_modifier(t.bo));
 
         // Export once; keep fd open for RGA use in process()
         t.prime_fd = gbm_bo_get_fd(t.bo);

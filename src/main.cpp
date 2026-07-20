@@ -658,6 +658,28 @@ extern "C" {
         osd_publish_bool_fact("dvr.recording", NULL, 0, false);
     }
 
+    // Called from the FrameProcessor thread the first time a frame can't be
+    // reliably converted (colour-correct/OSD-blend GPU or RGA copy/resize).
+    // Stops only the reencode recording -- raw recording (if DVR_MODE_BOTH)
+    // is a separate, unaffected path and keeps going -- and tells the user
+    // via an OSD popup so they don't think they got a usable recording.
+    void dvr_reenc_on_fatal_error(void) {
+        spdlog::error("DVR reencode: unrecoverable frame conversion failure, stopping recording");
+        if (dvr_reenc_inst) dvr_reenc_inst->stop_recording();
+        osd_publish_str_fact("osd.custom_message", NULL, 0,
+                             "DVR reencode failed\nrecording stopped");
+        // In DVR_MODE_BOTH, raw keeps recording independently and the
+        // indicator should stay on. Otherwise reencode was the only thing
+        // being recorded, so the "recording" indicator must reflect that
+        // nothing is actually being recorded anymore -- leaving it on would
+        // be exactly the misleading state this whole fail-fast design is
+        // meant to avoid.
+        if (dvr_mode != DVR_MODE_BOTH) {
+            dvr_enabled = 0;
+            osd_publish_bool_fact("dvr.recording", NULL, 0, false);
+        }
+    }
+
     /* C-callable wrapper so the menu (C) can set the raw DVR framerate without
      * touching the C++ Dvr* directly. */
     void dvr_set_video_framerate(Dvr* dvr, int f);   /* defined in dvr.cpp */
@@ -754,12 +776,16 @@ extern "C" {
                                  if (dvr_enabled && dvr_reenc_inst) dvr_reenc_inst->frame(nal);
                              });
             pthread_create(&g_tid_enc, NULL, &MppEncoder::__THREAD__, reencoder);
-            frame_proc = new FrameProcessor(reencoder, reenc_params.fps, reenc_params.resolution, drm_fd);
+            frame_proc = new FrameProcessor(reencoder, reenc_params.fps, reenc_params.resolution, drm_fd,
+                                           dvr_reenc_on_fatal_error);
             if (enable_live_colortrans)
                 frame_proc->set_color_correction(live_colortrans_gain,
                                                 live_colortrans_offset, drm_fd);
             pthread_create(&g_tid_fproc, NULL, &FrameProcessor::__THREAD__, frame_proc);
-            dvr_reenc_inst->on_start_cb = []() { if (reencoder) reencoder->request_idr(); };
+            dvr_reenc_inst->on_start_cb = []() {
+                if (reencoder) reencoder->request_idr();
+                if (frame_proc) frame_proc->clear_fatal_error();
+            };
         }
 
         dvr_mode = new_mode;
@@ -1712,7 +1738,8 @@ int main(int argc, char **argv)
 			});
 			ret = pthread_create(&g_tid_enc, NULL, &MppEncoder::__THREAD__, reencoder);
 			assert(!ret);
-			frame_proc = new FrameProcessor(reencoder, reenc_params.fps, reenc_params.resolution, drm_fd);
+			frame_proc = new FrameProcessor(reencoder, reenc_params.fps, reenc_params.resolution, drm_fd,
+			                               dvr_reenc_on_fatal_error);
 			if (enable_live_colortrans) {
 				frame_proc->set_color_correction(live_colortrans_gain,
 				                                live_colortrans_offset, drm_fd);
@@ -1723,6 +1750,7 @@ int main(int argc, char **argv)
 			assert(!ret);
 			dvr_reenc_inst->on_start_cb = []() {
 				if (reencoder) reencoder->request_idr();
+				if (frame_proc) frame_proc->clear_fatal_error();
 			};
 			spdlog::info("Re-encoding recorder: codec={} fps={} bitrate={}kbps",
 			             reenc_params.codec == VideoCodec::H265 ? "h265" : "h264",

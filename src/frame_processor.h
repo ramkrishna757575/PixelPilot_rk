@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 
 #include <rockchip/rk_mpi.h>
@@ -40,9 +41,16 @@ struct FrameProcFrame {
 
 class FrameProcessor {
 public:
+    // on_fatal_error is invoked (from the processor thread) the first time a
+    // frame can't be reliably converted -- see process_loop() for why this
+    // stops the reencode session instead of degrading through a fallback.
     FrameProcessor(MppEncoder *enc, int fps, EncResolution res = EncResolution::Res1080p,
-                   int drm_fd = -1);
+                   int drm_fd = -1, std::function<void()> on_fatal_error = nullptr);
     ~FrameProcessor();
+
+    // Re-arm after a fatal conversion failure (call when reencode recording
+    // is (re)started, e.g. from Dvr::on_start_cb).
+    void clear_fatal_error() { reenc_fatal_.store(false, std::memory_order_relaxed); }
 
     // Called from decoder thread: update the latest available frame.
     void push_latest(MppBuffer buf, uint32_t w, uint32_t h,
@@ -88,6 +96,8 @@ private:
     std::atomic<long>     interval_ns;
     std::atomic<int>      target_res_{1};  // 0=720p, 1=1080p
     std::atomic<bool>     running{true};
+    std::atomic<bool>     reenc_fatal_{false};  // set once a frame conversion fails
+    std::function<void()> on_fatal_error_;      // invoked once when reenc_fatal_ is set
     std::mutex              mtx;       // guards pending (shared with frame/decoder thread)
     std::condition_variable cv_;       // signalled by push_latest(); processor waits here
     std::mutex              copy_mtx_; // held by processor while it uses a decoder buffer
@@ -103,7 +113,6 @@ private:
     // Only accessed from the processor thread — no mutex needed:
     MppBufferGroup    hold_grp  = nullptr;  // our own DRM buffer pool
     MppBuffer         proc_copy_  = nullptr;  // processor's working buffer
-    MppBuffer         blend_rgba_ = nullptr;  // BGRA intermediate for RGA OSD fallback
     FrameProcFrame     proc_meta_;              // metadata being built by processor
 
     // OSD blend — shared between OSD thread (writer) and processor thread (reader)

@@ -25,8 +25,10 @@ static inline uint32_t align_up(uint32_t v, uint32_t a) {
     return (v + a - 1) & ~(a - 1);
 }
 
-FrameProcessor::FrameProcessor(MppEncoder *enc, int fps, EncResolution res, int drm_fd)
-    : encoder(enc), interval_ns(1000000000L / fps), target_res_((int)res), drm_fd_(drm_fd) {
+FrameProcessor::FrameProcessor(MppEncoder *enc, int fps, EncResolution res, int drm_fd,
+                               std::function<void()> on_fatal_error)
+    : encoder(enc), interval_ns(1000000000L / fps), target_res_((int)res),
+      on_fatal_error_(std::move(on_fatal_error)), drm_fd_(drm_fd) {
     mpp_buffer_group_get_internal(&hold_grp, MPP_BUFFER_TYPE_DRM);
 }
 
@@ -34,7 +36,6 @@ FrameProcessor::~FrameProcessor() {
     shutdown();
     if (last_copy)   { mpp_buffer_put(last_copy);   last_copy   = nullptr; }
     if (proc_copy_)  { mpp_buffer_put(proc_copy_);  proc_copy_  = nullptr; }
-    if (blend_rgba_) { mpp_buffer_put(blend_rgba_); blend_rgba_ = nullptr; }
     if (hold_grp)    { mpp_buffer_group_put(hold_grp); hold_grp = nullptr; }
 }
 
@@ -128,8 +129,10 @@ void FrameProcessor::process_loop() {
         }
         if (!fresh.buffer) continue;
 
-        // If DVR is not active, just drain the frame to release the decoder ref.
-        if (!dvr_enabled || !encoder) {
+        // If DVR is not active, or a prior frame failed to convert and the
+        // reencode session hasn't been restarted since, just drain the
+        // frame to release the decoder ref.
+        if (!dvr_enabled || !encoder || reenc_fatal_.load(std::memory_order_relaxed)) {
             fresh.release();
             continue;
         }
@@ -145,6 +148,7 @@ void FrameProcessor::process_loop() {
 
         // ── Copy / resize / colour-correct / OSD blend ──────────────────
         // copy_mtx_ is held so drain_decoder_refs() can safely wait for us.
+        bool fatal = false;
         {
             std::lock_guard<std::mutex> copy_lock(copy_mtx_);
 
@@ -184,27 +188,28 @@ void FrameProcessor::process_loop() {
                     color_gl_.init(drm_fd_, dst_w, dst_h, cc_gain_, cc_offset_);
                 }
 
-                bool copied = false;
-                if (need_gl && color_gl_.ready()) {
-                    // Register current OSD buffer with the GL shader.
-                    if (osd_snap.prime_fd >= 0)
-                        color_gl_.set_osd(osd_snap.prime_fd,
-                                          osd_snap.width, osd_snap.height,
-                                          osd_snap.stride_px);
-                    else
-                        color_gl_.clear_osd();
-
+                bool ok;
+                if (need_gl) {
                     // GPU: NV12 → RGBA (shader: colorcorrect + OSD blend)
                     //      → NV12 (RGA CSC, no resize — GBM BO is at output size)
-                    copied = color_gl_.process(
-                        mpp_buffer_get_fd(fresh.buffer),
-                        fresh.width, fresh.height,
-                        fresh.hor_stride, fresh.ver_stride,
-                        mpp_buffer_get_fd(proc_copy_),
-                        dst_hs, dst_vs);
-                }
-                if (!copied) {
-                    // ── RGA fallback: resize/copy + RGA OSD blend ────────
+                    ok = color_gl_.ready();
+                    if (ok) {
+                        if (osd_snap.prime_fd >= 0)
+                            color_gl_.set_osd(osd_snap.prime_fd,
+                                              osd_snap.width, osd_snap.height,
+                                              osd_snap.stride_px);
+                        else
+                            color_gl_.clear_osd();
+
+                        ok = color_gl_.process(
+                            mpp_buffer_get_fd(fresh.buffer),
+                            fresh.width, fresh.height,
+                            fresh.hor_stride, fresh.ver_stride,
+                            mpp_buffer_get_fd(proc_copy_),
+                            dst_hs, dst_vs);
+                    }
+                } else {
+                    // Neither colour-correction nor OSD active: plain RGA copy/resize.
                     int rga_fmt = mpp_fmt_to_rga(fresh.fmt);
                     rga_buffer_t src_rga = wrapbuffer_fd_t(
                         mpp_buffer_get_fd(fresh.buffer),
@@ -213,57 +218,37 @@ void FrameProcessor::process_loop() {
                     rga_buffer_t dst_rga = wrapbuffer_fd_t(
                         mpp_buffer_get_fd(proc_copy_),
                         dst_w, dst_h, dst_hs, dst_vs, rga_fmt);
-                    if (fresh.width == dst_w && fresh.height == dst_h) {
-                        if (imcopy(src_rga, dst_rga) != IM_STATUS_SUCCESS) {
-                            size_t copy_sz = (size_t)fresh.hor_stride * fresh.ver_stride * 3 / 2;
-                            size_t actual = mpp_buffer_get_size(fresh.buffer);
-                            if (copy_sz > actual) copy_sz = actual;
-                            void *sp = mpp_buffer_get_ptr(fresh.buffer);
-                            void *dp = mpp_buffer_get_ptr(proc_copy_);
-                            if (sp && dp) memcpy(dp, sp, copy_sz);
-                        }
-                    } else {
-                        if (imresize(src_rga, dst_rga) != IM_STATUS_SUCCESS) {
-                            spdlog::warn("RGA resize failed {}x{} -> {}x{}",
-                                         fresh.width, fresh.height, dst_w, dst_h);
-                        }
-                    }
-
-                    // RGA OSD blend fallback (3 ops: NV12→BGRA, blend, BGRA→NV12)
-                    if (osd_snap.prime_fd >= 0 && osd_snap.width > 0 && osd_snap.height > 0) {
-                        size_t bgra_sz = (size_t)dst_hs * dst_vs * 4;
-                        if (!blend_rgba_ || mpp_buffer_get_size(blend_rgba_) < bgra_sz) {
-                            if (blend_rgba_) { mpp_buffer_put(blend_rgba_); blend_rgba_ = nullptr; }
-                            mpp_buffer_get(hold_grp, &blend_rgba_, bgra_sz);
-                        }
-                        if (blend_rgba_) {
-                            rga_buffer_t nv12 = wrapbuffer_fd_t(
-                                mpp_buffer_get_fd(proc_copy_),
-                                dst_w, dst_h, dst_hs, dst_vs,
-                                RK_FORMAT_YCbCr_420_SP);
-                            rga_buffer_t bgra = wrapbuffer_fd_t(
-                                mpp_buffer_get_fd(blend_rgba_),
-                                dst_w, dst_h, dst_hs, dst_vs,
-                                RK_FORMAT_BGRA_8888);
-                            rga_buffer_t osd_rga = wrapbuffer_fd_t(
-                                osd_snap.prime_fd,
-                                osd_snap.width, osd_snap.height,
-                                osd_snap.stride_px, osd_snap.height,
-                                RK_FORMAT_BGRA_8888);
-                            imcvtcolor(nv12, bgra, RK_FORMAT_YCbCr_420_SP, RK_FORMAT_BGRA_8888);
-                            imblend(osd_rga, bgra, IM_ALPHA_BLEND_SRC_OVER);
-                            imcvtcolor(bgra, nv12, RK_FORMAT_BGRA_8888, RK_FORMAT_YCbCr_420_SP);
-                        }
-                    }
+                    ok = (fresh.width == dst_w && fresh.height == dst_h)
+                         ? (imcopy(src_rga, dst_rga) == IM_STATUS_SUCCESS)
+                         : (imresize(src_rga, dst_rga) == IM_STATUS_SUCCESS);
                 }
-                proc_meta_.width      = dst_w;
-                proc_meta_.height     = dst_h;
-                proc_meta_.hor_stride = dst_hs;
-                proc_meta_.ver_stride = dst_vs;
-                proc_meta_.fmt        = fresh.fmt;
-                proc_meta_.buffer     = nullptr;
+
+                // Never publish a frame we can't be sure is fully and
+                // correctly written: a "successful-looking" recording that's
+                // actually corrupted (skipped colour-correction and/or a
+                // garbled image region -- confirmed reproducible via hardware
+                // fault injection) is worse than one that visibly stops, so
+                // any conversion failure ends the reencode session instead of
+                // degrading through a best-effort fallback.
+                if (!ok) {
+                    spdlog::error("FrameProcessor: frame conversion failed, stopping DVR reencode");
+                    fatal = true;
+                } else {
+                    proc_meta_.width      = dst_w;
+                    proc_meta_.height     = dst_h;
+                    proc_meta_.hor_stride = dst_hs;
+                    proc_meta_.ver_stride = dst_vs;
+                    proc_meta_.fmt        = fresh.fmt;
+                    proc_meta_.buffer     = nullptr;
+                }
             }
             fresh.release();  // decoder buffer is free again
+        }
+
+        if (fatal) {
+            reenc_fatal_.store(true, std::memory_order_relaxed);
+            if (on_fatal_error_) on_fatal_error_();
+            continue;
         }
 
         // ── Publish: swap proc buffer into last_copy for the timer ──────
