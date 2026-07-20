@@ -223,6 +223,34 @@ void FrameProcessor::process_loop() {
                          : (imresize(src_rga, dst_rga) == IM_STATUS_SUCCESS);
                 }
 
+                // Guarantee the padding rows (present whenever dst_h isn't
+                // 16-aligned, e.g. 1080p's 8 rows up to dst_vs) always hold
+                // sane content, by construction rather than by detection.
+                // A hardware probe confirmed this platform's dma-buf cache
+                // sync is a no-op for CPU reads of RGA-written memory (even
+                // with DMA_BUF_IOCTL_SYNC on the correct fd/mapping), so a
+                // "poison then check via CPU" guard is fundamentally unable
+                // to observe RGA's output here -- this instead extends the
+                // last real row(s) into the padding with one more RGA copy,
+                // entirely within the RGA/DMA domain, needing no CPU read of
+                // GPU/RGA-written memory at all.
+                if (ok && dst_vs > dst_h) {
+                    uint32_t pad_h = dst_vs - dst_h;
+                    rga_buffer_t pad_buf = wrapbuffer_fd_t(
+                        mpp_buffer_get_fd(proc_copy_),
+                        dst_w, dst_h, dst_hs, dst_vs, RK_FORMAT_YCbCr_420_SP);
+                    rga_buffer_t pat = {};
+                    im_rect srect = {0, (int)(dst_h - pad_h), (int)dst_w, (int)pad_h};
+                    im_rect drect = {0, (int)dst_h,           (int)dst_w, (int)pad_h};
+                    im_rect prect = {};
+                    im_opt_t opt = {};
+                    if (improcess(pad_buf, pad_buf, pat, srect, drect, prect,
+                                  -1, nullptr, &opt, IM_SYNC) != IM_STATUS_SUCCESS) {
+                        spdlog::error("FrameProcessor: failed to cover output padding");
+                        ok = false;
+                    }
+                }
+
                 // Never publish a frame we can't be sure is fully and
                 // correctly written: a "successful-looking" recording that's
                 // actually corrupted (skipped colour-correction and/or a
