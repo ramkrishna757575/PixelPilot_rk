@@ -16,6 +16,7 @@
 #include <inttypes.h>
 #include <signal.h>
 #include <fstream>
+#include <chrono>
 #include <atomic>
 #include <queue>
 #include <mutex>
@@ -36,6 +37,8 @@
 #include <nlohmann/json.hpp>
 #include <yaml-cpp/yaml.h>
 #include "spdlog/spdlog.h"
+#include "spdlog/sinks/stdout_color_sinks.h"
+#include "spdlog/sinks/rotating_file_sink.h"
 
 extern "C" {
 #include "main.h"
@@ -339,6 +342,28 @@ void *__FRAME_THREAD__(void *param)
 					}
 					idr_request_decoder_issue(reason);
 				}
+
+				// Track decoder error/discard rates over time: these are
+				// otherwise completely silent unless they escalate to an
+				// (independently rate-limited) IDR request, but a storm of
+				// them is exactly the "poor-link period" signal that has
+				// correlated with rare RGA/GPU frame-conversion hiccups
+				// downstream -- worth having in the log to line up against
+				// any later "frame conversion failed" error.
+				static uint64_t win_errinfo = 0, win_discard = 0, win_frames = 0;
+				static time_t win_start = 0;
+				win_frames++;
+				if (errinfo) win_errinfo++;
+				if (discard) win_discard++;
+				if (win_start == 0) win_start = ats.tv_sec;
+				if (ats.tv_sec - win_start >= 5) {
+					if (win_errinfo || win_discard) {
+						spdlog::warn("Decoder health: {} frames, errinfo={} discard={} in last {}s",
+						             win_frames, win_errinfo, win_discard, ats.tv_sec - win_start);
+					}
+					win_errinfo = win_discard = win_frames = 0;
+					win_start = ats.tv_sec;
+				}
 				if (!mpi.first_frame_ts.tv_sec) {
 					ts = ats;
 					mpi.first_frame_ts = ats;
@@ -505,12 +530,15 @@ void sigusr1_handler(int signum) {
 	bool was_enabled = dvr_enabled;
 	if (was_enabled) {
 		// Stopping
+		spdlog::info("DVR: stopping recording (SIGUSR1)");
 		if (dvr_raw) dvr_raw->stop_recording();
 		if (dvr_reenc_inst) dvr_reenc_inst->stop_recording();
 		dvr_enabled = 0;
 		osd_publish_bool_fact("dvr.recording", NULL, 0, false);
 	} else {
 		// Starting
+		spdlog::info("DVR: starting recording (SIGUSR1, mode={})",
+		             dvr_mode == DVR_MODE_RAW ? "raw" : dvr_mode == DVR_MODE_REENCODE ? "reencode" : "both");
 		dvr_enabled = 1;
 		osd_publish_bool_fact("dvr.recording", NULL, 0, true);
 		if (dvr_raw) dvr_raw->start_recording();
@@ -644,6 +672,8 @@ extern "C" {
     }
 
     void dvr_start_all(void) {
+        spdlog::info("DVR: starting recording (mode={})",
+                     dvr_mode == DVR_MODE_RAW ? "raw" : dvr_mode == DVR_MODE_REENCODE ? "reencode" : "both");
         dvr_enabled = 1;
         osd_publish_bool_fact("dvr.recording", NULL, 0, true);
         if (dvr_raw) dvr_raw->start_recording();
@@ -652,6 +682,7 @@ extern "C" {
     }
 
     void dvr_stop_all(void) {
+        spdlog::info("DVR: stopping recording");
         if (dvr_raw) dvr_raw->stop_recording();
         if (dvr_reenc_inst) dvr_reenc_inst->stop_recording();
         dvr_enabled = 0;
@@ -1167,6 +1198,9 @@ void printHelp() {
     "\n"
     "    --log-level <level>    - Log verbosity level, debug|info|warn|error (Default: info)\n"
     "\n"
+    "    --log-file <path>      - Also log to <path> (rotated at 1MB, 3 files kept).\n"
+    "                             Use \"none\" to disable file logging. (Default: /var/log/pixelpilot.log)\n"
+    "\n"
     "    --osd                  - Enable OSD\n"
     "\n"
     "    --osd-config <file>    - Path to OSD configuration file\n"
@@ -1246,6 +1280,8 @@ int main(int argc, char **argv)
 	char * config_file_path = NULL;
 	std::string osd_config_path;
 	auto log_level = spdlog::level::info;
+	std::string log_file_path = "/var/log/pixelpilot.log";
+	bool debug_log_pattern = false;
 	
     std::string pidFilePath = "/run/pixelpilot.pid";
     std::ofstream pidFile(pidFilePath);
@@ -1377,7 +1413,7 @@ int main(int argc, char **argv)
 			log_level = spdlog::level::info;
 		} else if (log_l == "debug"){
 			log_level = spdlog::level::debug;
-			spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [thread %t] [%s:%#] [%^%l%$] %v");
+			debug_log_pattern = true;
 		} else if (log_l == "warn"){
 			log_level = spdlog::level::warn;
 		} else if (log_l == "error"){
@@ -1387,6 +1423,11 @@ int main(int argc, char **argv)
 			printHelp();
 			return -1;
 		}
+		continue;
+	}
+
+	__OnArgument("--log-file") {
+		log_file_path = std::string(__ArgValue);
 		continue;
 	}
 
@@ -1493,7 +1534,42 @@ int main(int argc, char **argv)
 
 	__EndParseConsoleArguments__
 
+	// Give logs a durable home before anything else runs: the console sink
+	// alone is useless once pixelpilot is launched as a backgrounded daemon
+	// (start-stop-daemon -b), since nothing captures stdout in that case --
+	// without a file sink, every spdlog:: call up to now was unrecoverable
+	// for post-hoc field debugging. Keeps the console sink too, so
+	// interactive SSH sessions still see live output.
+	if (!log_file_path.empty() && log_file_path != "none") {
+		try {
+			auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+			auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+				log_file_path, 1 * 1024 * 1024, 3);
+			auto logger = std::make_shared<spdlog::logger>(
+				"pixelpilot", spdlog::sinks_init_list{console_sink, file_sink});
+			spdlog::set_default_logger(logger);
+			// Neither extreme works for a daemon: never flushing means the
+			// handful of lines written right before a crash/kill -- the
+			// exact moment this log exists to capture -- can sit unflushed
+			// forever, while flushing on every call would add I/O on the
+			// FrameProcessor/decoder hot paths, which run on a tight
+			// per-frame microsecond budget. Split it: anything warn or
+			// worse (rare, and precisely the messages likely to precede a
+			// crash) flushes immediately; everything else is flushed by a
+			// lightweight background timer at most every 5s, so routine
+			// info/debug output never lags far behind either.
+			logger->flush_on(spdlog::level::warn);
+			spdlog::flush_every(std::chrono::seconds(5));
+		} catch (const spdlog::spdlog_ex &ex) {
+			spdlog::warn("Could not open log file '{}' ({}); logging to console only",
+			             log_file_path, ex.what());
+		}
+	}
+
 	spdlog::set_level(log_level);
+	if (debug_log_pattern) {
+		spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [thread %t] [%s:%#] [%^%l%$] %v");
+	}
 	idr_set_enabled(!disable_gregidr);
 
 	if (dvr_template != NULL && (dvr_mode == DVR_MODE_RAW || dvr_mode == DVR_MODE_BOTH) && video_framerate < 0) {
@@ -1649,6 +1725,19 @@ int main(int argc, char **argv)
 		return -2;
 	}
 
+	// One consolidated line describing the session, so a log capturing only
+	// the tail of a long run (or the support-data collector's truncation of
+	// large logs) still tells you what configuration produced it.
+	spdlog::info("PixelPilot {}.{} starting: codec={} display={}x{}@{} dvr-mode={} "
+	             "dvr-reenc-codec={} dvr-reenc-res={} live-colortrans={} log-file={}",
+	             APP_VERSION_MAJOR, APP_VERSION_MINOR,
+	             codec == VideoCodec::H265 ? "h265" : codec == VideoCodec::H264 ? "h264" : "auto",
+	             output_list->mode.hdisplay, output_list->mode.vdisplay, output_list->mode.vrefresh,
+	             dvr_mode == DVR_MODE_RAW ? "raw" : dvr_mode == DVR_MODE_REENCODE ? "reencode" : "both",
+	             reenc_params.codec == VideoCodec::H265 ? "h265" : "h264",
+	             reenc_params.resolution == EncResolution::Res1080p ? "1080p" : "720p",
+	             enable_live_colortrans, log_file_path.empty() ? "none" : log_file_path);
+
 	gamma_lut_controller_init(&lut_ctrl, drm_fd, output_list);
 
 	if (enable_live_colortrans) {
@@ -1758,6 +1847,8 @@ int main(int argc, char **argv)
 		}
 
 		if (dvr_autostart) {
+			spdlog::info("DVR: autostart (--dvr-start) recording (mode={})",
+			             dvr_mode == DVR_MODE_RAW ? "raw" : dvr_mode == DVR_MODE_REENCODE ? "reencode" : "both");
 			dvr_enabled = 1;
 			osd_publish_bool_fact("dvr.recording", NULL, 0, true);
 			if (dvr_raw) dvr_raw->start_recording();
