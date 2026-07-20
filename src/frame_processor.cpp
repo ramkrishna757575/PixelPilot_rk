@@ -227,25 +227,30 @@ void FrameProcessor::process_loop() {
                 // 16-aligned, e.g. 1080p's 8 rows up to dst_vs) always hold
                 // sane content, by construction rather than by detection.
                 // A hardware probe confirmed this platform's dma-buf cache
-                // sync is a no-op for CPU reads of RGA-written memory (even
-                // with DMA_BUF_IOCTL_SYNC on the correct fd/mapping), so a
-                // "poison then check via CPU" guard is fundamentally unable
-                // to observe RGA's output here -- this instead extends the
-                // last real row(s) into the padding with one more RGA copy,
-                // entirely within the RGA/DMA domain, needing no CPU read of
-                // GPU/RGA-written memory at all.
+                // sync is a no-op for CPU reads of RGA/GPU-written memory
+                // (even with DMA_BUF_IOCTL_SYNC on the correct fd/mapping),
+                // so a "poison then check via CPU" guard can't observe RGA's
+                // output here -- but a plain CPU *write* is fine, since the
+                // encoder (a separate DMA consumer, reading afterward) has
+                // always reliably seen CPU-written content in this buffer
+                // (same primitives as the raw-copy fallback path, proven
+                // extensively earlier). Writing directly avoids needing any
+                // RGA call for this at all, so it's identical on every
+                // librga version/build target instead of depending on which
+                // im2d API happens to be available at compile time.
                 if (ok && dst_vs > dst_h) {
-                    uint32_t pad_h = dst_vs - dst_h;
-                    rga_buffer_t pad_buf = wrapbuffer_fd_t(
-                        mpp_buffer_get_fd(proc_copy_),
-                        dst_w, dst_h, dst_hs, dst_vs, RK_FORMAT_YCbCr_420_SP);
-                    rga_buffer_t pat = {};
-                    im_rect srect = {0, (int)(dst_h - pad_h), (int)dst_w, (int)pad_h};
-                    im_rect drect = {0, (int)dst_h,           (int)dst_w, (int)pad_h};
-                    im_rect prect = {};
-                    im_opt_t opt = {};
-                    if (improcess(pad_buf, pad_buf, pat, srect, drect, prect,
-                                  -1, nullptr, &opt, IM_SYNC) != IM_STATUS_SUCCESS) {
+                    uint8_t *base = (uint8_t *)mpp_buffer_get_ptr(proc_copy_);
+                    if (base) {
+                        // Y-plane padding rows [dst_h, dst_vs).
+                        memset(base + (size_t)dst_h * dst_hs, 128,
+                              (size_t)(dst_vs - dst_h) * dst_hs);
+                        // UV-plane padding rows [dst_h/2, dst_vs/2) -- U and V
+                        // are interleaved, so 128/128 (neutral chroma) is a
+                        // flat fill across the whole sub-region.
+                        size_t uv_off = (size_t)dst_hs * dst_vs;
+                        memset(base + uv_off + (size_t)(dst_h / 2) * dst_hs, 128,
+                              (size_t)(dst_vs / 2 - dst_h / 2) * dst_hs);
+                    } else {
                         spdlog::error("FrameProcessor: failed to cover output padding");
                         ok = false;
                     }
