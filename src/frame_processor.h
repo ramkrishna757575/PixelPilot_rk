@@ -26,19 +26,26 @@
 //  instead of the serial sum of all stages.
 // ---------------------------------------------------------------------------
 
-struct FrameProcFrame {
-    MppBuffer      buffer     = nullptr;
-    uint32_t       width      = 0;
-    uint32_t       height     = 0;
-    uint32_t       hor_stride = 0;
-    uint32_t       ver_stride = 0;
-    MppFrameFormat fmt        = MPP_FMT_YUV420SP;
-    void release() {
-        if (buffer) { mpp_buffer_put(buffer); buffer = nullptr; }
+struct FrameProcFrame
+{
+    MppBuffer buffer = nullptr;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t hor_stride = 0;
+    uint32_t ver_stride = 0;
+    MppFrameFormat fmt = MPP_FMT_YUV420SP;
+    void release()
+    {
+        if (buffer)
+        {
+            mpp_buffer_put(buffer);
+            buffer = nullptr;
+        }
     }
 };
 
-class FrameProcessor {
+class FrameProcessor
+{
 public:
     FrameProcessor(MppEncoder *enc, int fps, EncResolution res = EncResolution::Res1080p,
                    int drm_fd = -1);
@@ -67,7 +74,8 @@ public:
 
     // Enable/disable color correction at runtime without changing the stored params.
     // Thread-safe: safe to toggle from the UI thread while the pacer is running.
-    void set_color_correction_enabled(bool on) {
+    void set_color_correction_enabled(bool on)
+    {
         color_correct_.store(on, std::memory_order_relaxed);
     }
 
@@ -89,47 +97,48 @@ private:
     void process_loop();
     void timer_loop();
 
-    MppEncoder            *encoder;
-    std::atomic<long>     interval_ns;
-    std::atomic<int>      target_res_{1};  // 0=720p, 1=1080p
-    std::atomic<bool>     running{true};
-    std::atomic<bool>     always_active_{false};  // true = ignore dvr_enabled gate
-    std::mutex              mtx;       // guards pending (shared with frame/decoder thread)
-    std::condition_variable cv_;       // signalled by push_latest(); processor waits here
-    std::mutex              copy_mtx_; // held by processor while it uses a decoder buffer
-    FrameProcFrame     pending;   // latest from decoder (shared with decoder thread)
+    MppEncoder *encoder;
+    std::atomic<long> interval_ns;
+    std::atomic<int> target_res_{1}; // 0=720p, 1=1080p
+    std::atomic<bool> running{true};
+    std::atomic<bool> always_active_{false}; // true = ignore dvr_enabled gate
+    std::mutex mtx;                          // guards pending (shared with frame/decoder thread)
+    std::condition_variable cv_;             // signalled by push_latest(); processor waits here
+    std::mutex copy_mtx_;                    // held by processor while it uses a decoder buffer
+    FrameProcFrame pending;                  // latest from decoder (shared with decoder thread)
 
     // Shared between processor (writer) and timer (reader):
-    std::mutex              ready_mtx_;       // guards last_copy / last_meta
-    std::condition_variable ready_cv_;        // signalled when fresh frame published
-    bool                    ready_fresh_{false}; // true = last_copy updated since last pickup
-    MppBuffer         last_copy   = nullptr;  // latest processed frame pixels
-    FrameProcFrame     last_meta;              // geometry/format for last_copy
+    std::mutex ready_mtx_;             // guards last_copy / last_meta
+    std::condition_variable ready_cv_; // signalled when fresh frame published
+    bool ready_fresh_{false};          // true = last_copy updated since last pickup
+    MppBuffer last_copy = nullptr;     // latest processed frame pixels
+    FrameProcFrame last_meta;          // geometry/format for last_copy
 
     // Only accessed from the processor thread — no mutex needed:
-    MppBufferGroup    hold_grp  = nullptr;  // our own DRM buffer pool
-    MppBuffer         proc_copy_  = nullptr;  // processor's working buffer
-    MppBuffer         blend_rgba_ = nullptr;  // BGRA intermediate for RGA OSD fallback
-    FrameProcFrame     proc_meta_;              // metadata being built by processor
+    MppBufferGroup hold_grp = nullptr; // our own DRM buffer pool
+    MppBuffer proc_copy_ = nullptr;    // processor's working buffer
+    MppBuffer blend_rgba_ = nullptr;   // BGRA intermediate for RGA OSD fallback
+    FrameProcFrame proc_meta_;         // metadata being built by processor
 
     // OSD blend — shared between OSD thread (writer) and processor thread (reader)
-    struct OsdInfo {
-        int      prime_fd{-1};
+    struct OsdInfo
+    {
+        int prime_fd{-1};
         uint32_t width{0}, height{0}, stride_px{0};
     };
-    std::mutex  osd_mtx_;
-    OsdInfo     osd_info_;      // latest OSD frame descriptor
+    std::mutex osd_mtx_;
+    OsdInfo osd_info_; // latest OSD frame descriptor
 
     // GL pipeline — handles colour-correction and/or OSD blend in one GPU pass.
     // Lazy-initialised on the processor thread on the first frame that needs it.
     // Written by UI thread (set_color_correction / set_color_correction_enabled),
     // read by processor thread — must be atomic where shared.
-    std::atomic<bool>  color_correct_{false};
-    bool               gl_init_done_{false};
-    uint32_t           gl_out_w_{0}, gl_out_h_{0};  // output dims at last GL init
-    float              cc_gain_{1.f}, cc_offset_{0.f};
-    int                drm_fd_{-1};  // DRM fd for GBM/EGL (passed at construction)
-    FrameColorCorrect  color_gl_;
+    std::atomic<bool> color_correct_{false};
+    bool gl_init_done_{false};
+    uint32_t gl_out_w_{0}, gl_out_h_{0}; // output dims at last GL init
+    float cc_gain_{1.f}, cc_offset_{0.f};
+    int drm_fd_{-1}; // DRM fd for GBM/EGL (passed at construction)
+    FrameColorCorrect color_gl_;
 };
 
 #endif // FRAME_PROCESSOR_H

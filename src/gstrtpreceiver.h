@@ -21,21 +21,26 @@
 #define MAX_PACKET_SIZE 4096
 #define RTP_HEADER_LEN 12
 
-enum class VideoCodec {
-    UNKNOWN=0,
+enum class VideoCodec
+{
+    UNKNOWN = 0,
     H264,
     H265,
     MJPEG
 };
 
-static VideoCodec video_codec(const char * str) {
-    if (!strcmp(str, "h264")) {
+static VideoCodec video_codec(const char *str)
+{
+    if (!strcmp(str, "h264"))
+    {
         return VideoCodec::H264;
     }
-    if (!strcmp(str, "h265")) {
+    if (!strcmp(str, "h265"))
+    {
         return VideoCodec::H265;
     }
-    if (!strcmp(str, "mjpeg")) {
+    if (!strcmp(str, "mjpeg"))
+    {
         return VideoCodec::MJPEG;
     }
     return VideoCodec::UNKNOWN;
@@ -45,13 +50,14 @@ static VideoCodec video_codec(const char * str) {
  * @brief Uses gstreamer and appsink to expose the functionality of receiving and parsing
  * rtp h264 and h265.
  */
-class GstRtpReceiver {
+class GstRtpReceiver
+{
 public:
     /**
      * The constructor is delayed, remember to use start_receiving()
      */
-    explicit GstRtpReceiver(int udp_port, const VideoCodec& codec);
-    explicit GstRtpReceiver(const char *s, const VideoCodec& codec);
+    explicit GstRtpReceiver(int udp_port, const VideoCodec &codec);
+    explicit GstRtpReceiver(const char *s, const VideoCodec &codec);
     virtual ~GstRtpReceiver();
     // Depending on the codec, these are h264,h265 or mjpeg "frames" / frame buffers
     // The big advantage of gstreamer is that it seems to handle all those parsing quirks the best,
@@ -59,7 +65,7 @@ public:
     typedef std::function<void(std::shared_ptr<std::vector<uint8_t>> frame)> NEW_FRAME_CALLBACK;
     void start_receiving(NEW_FRAME_CALLBACK cb);
     void stop_receiving();
-    VideoCodec switch_to_file_playback(const char* file_path);
+    VideoCodec switch_to_file_playback(const char *file_path);
     void switch_to_stream();
     void fast_forward(double rate = 2.0);
     void fast_rewind(double rate = 2.0);
@@ -75,15 +81,16 @@ public:
     // Invoked (on an internal thread) after a mid-stream codec switch has been
     // detected and the pipeline rebuilt, so the host can realign its decoder.
     void set_codec_changed_callback(std::function<void(VideoCodec)> cb);
+
 private:
     // Rebuild the pipeline for new_codec after a mid-stream switch is detected.
     void request_codec_switch(VideoCodec new_codec);
     std::string construct_gstreamer_pipeline();
-    std::string construct_file_playback_pipeline(const char * file_path);
+    std::string construct_file_playback_pipeline(const char *file_path);
     void loop_pull_samples();
     void on_new_sample(std::shared_ptr<std::vector<uint8_t>> sample);
     // The gstreamer pipeline
-    GstElement * m_gst_pipeline=nullptr;
+    GstElement *m_gst_pipeline = nullptr;
     NEW_FRAME_CALLBACK m_cb;
     VideoCodec m_video_codec;
     // True when constructed with VideoCodec::UNKNOWN ("auto"): the pipeline
@@ -98,9 +105,9 @@ private:
     // appsink
     GstElement *m_app_sink_element = nullptr;
     bool m_pull_samples_run;
-    std::unique_ptr<std::thread> m_pull_samples_thread=nullptr;
+    std::unique_ptr<std::thread> m_pull_samples_thread = nullptr;
     // appsrc
-    const char* unix_socket = nullptr;
+    const char *unix_socket = nullptr;
     int sock = -1;
     bool m_read_socket_run = false;
     std::unique_ptr<std::thread> m_read_socket_thread;
@@ -113,23 +120,23 @@ private:
 };
 #endif
 
-
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
-void idr_set_enabled(bool enabled);
-bool idr_get_enabled();
-void restream_set_enabled(bool enabled);
-bool restream_get_enabled();
-void restream_scan_clients(char* buf, size_t buf_len);
-void restream_set_manual_ip(const char* ip);
-const char* restream_get_manual_ip();
-void restream_set_pinned_ip(const char* ip);
-void idr_request_record_start();
-void idr_request_decoder_issue(const char* reason);
-void idr_notify_decoded_frame();
+    void idr_set_enabled(bool enabled);
+    bool idr_get_enabled();
+    void restream_set_enabled(bool enabled);
+    bool restream_get_enabled();
+    void restream_scan_clients(char *buf, size_t buf_len);
+    void restream_set_manual_ip(const char *ip);
+    const char *restream_get_manual_ip();
+    void restream_set_pinned_ip(const char *ip);
+    void idr_request_record_start();
+    void idr_request_decoder_issue(const char *reason);
+    void idr_notify_decoded_frame();
 #ifdef __cplusplus
 }
 #endif
 
-#endif //FPVUE_GSTRTPRECEIVER_H
+#endif // FPVUE_GSTRTPRECEIVER_H

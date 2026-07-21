@@ -37,7 +37,8 @@
 #include <yaml-cpp/yaml.h>
 #include "spdlog/spdlog.h"
 
-extern "C" {
+extern "C"
+{
 #include "main.h"
 #include "drm.h"
 
@@ -62,25 +63,26 @@ extern "C" {
 #include "WiFiRSSIMonitor.hpp"
 #include "menu.h"
 
+#define READ_BUF_SIZE (1024 * 1024) // SZ_1M https://github.com/rockchip-linux/mpp/blob/ed377c99a733e2cdbcc457a6aa3f0fcd438a9dff/osal/inc/mpp_common.h#L179
+#define MAX_FRAMES 24				// min 16 and 20+ recommended (mpp/readme.txt)
 
-#define READ_BUF_SIZE (1024*1024) // SZ_1M https://github.com/rockchip-linux/mpp/blob/ed377c99a733e2cdbcc457a6aa3f0fcd438a9dff/osal/inc/mpp_common.h#L179
-#define MAX_FRAMES 24		// min 16 and 20+ recommended (mpp/readme.txt)
-
-#define CODEC_ALIGN(x, a)   (((x)+(a)-1)&~((a)-1))
+#define CODEC_ALIGN(x, a) (((x) + (a) - 1) & ~((a) - 1))
 
 #define DEFAULT_CONFIG_PATH "/etc/pixelpilot.yaml"
 YAML::Node config;
 
 #define MSG_FIFO_NAME "/run/pixelpilot.msg"
 
-struct {
-	MppCtx		  ctx;
-	MppApi		  *mpi;
-	
+struct
+{
+	MppCtx ctx;
+	MppApi *mpi;
+
 	struct timespec first_frame_ts;
 
-	MppBufferGroup	frm_grp;
-	struct {
+	MppBufferGroup frm_grp;
+	struct
+	{
 		int prime_fd;
 		uint32_t fb_id;
 		uint32_t handle;
@@ -98,7 +100,7 @@ extern bool osd_update_ready;
 extern bool gsmenu_enabled;
 int video_zpos = 1;
 
-void set_mpp_decoding_parameters(MppApi * mpi, MppCtx ctx);
+void set_mpp_decoding_parameters(MppApi *mpi, MppCtx ctx);
 static pthread_mutex_t mpp_reinit_mutex = PTHREAD_MUTEX_INITIALIZER;
 static std::atomic<bool> mpp_reinit_pending{false};
 
@@ -106,47 +108,53 @@ bool mavlink_dvr_on_arm = false;
 bool osd_custom_message = false;
 bool disable_vsync = false;
 bool disable_gregidr = false;
+// Headless mode: run without an HDMI/DRM display. The RTP stream is still
+// received and restreamed to a tethered phone, but local decode/display, OSD
+// and DVR are skipped. Lets the ground station forward video to the phone even
+// when no monitor is attached.
+bool headless = false;
 uint32_t refresh_frequency_ms = 1000;
 
 VideoCodec codec = VideoCodec::H265;
 uint16_t listen_port = 5600;
-const char* unix_socket = NULL;
-char* dvr_template = NULL;
+const char *unix_socket = NULL;
+char *dvr_template = NULL;
 Dvr *dvr_raw = NULL;
 Dvr *dvr_reenc_inst = NULL;
 MppEncoder *reencoder = NULL;
 MppEncoderParams reenc_params;
 DvrMode dvr_mode = DVR_MODE_RAW;
-bool dvr_osd   = false;
+bool dvr_osd = false;
 static int video_framerate = -1;
 static bool dvr_filenames_with_sequence = false;
 static int mp4_fragmentation_mode = 0;
-static int64_t dvr_max_file_size = 4000000000LL;  // 4 GB (decimal), safe margin for VFAT 4 GiB limit
+static int64_t dvr_max_file_size = 4000000000LL; // 4 GB (decimal), safe margin for VFAT 4 GiB limit
 FrameProcessor *frame_proc = nullptr;
 // Thread handles for the encoder and pacer — file-scope so live mode toggle can join them.
-static pthread_t g_tid_enc   = 0;
+static pthread_t g_tid_enc = 0;
 static pthread_t g_tid_fproc = 0;
-static pthread_t g_tid_dvr_raw   = 0;
+static pthread_t g_tid_dvr_raw = 0;
 static pthread_t g_tid_dvr_reenc = 0;
 
 // ── USB webcam (UVC) re-stream ──────────────────────────────────────────────
 // Independent MJPEG pipeline (own encoder + pacer + UVC sink) so it can run
 // concurrently with the H264/H265 DVR re-encode. Mirrors the DVR globals above.
-FrameProcessor  *webcam_frame_proc = nullptr;
-MppEncoder      *webcam_encoder    = nullptr;
-UvcSink         *webcam_sink       = nullptr;
-MppEncoderParams webcam_params = [] {
-    MppEncoderParams p;
-    p.codec      = VideoCodec::MJPEG;
-    p.resolution = EncResolution::Res720p;
-    p.fps        = 30;
-    p.quality    = 80;
-    return p;
+FrameProcessor *webcam_frame_proc = nullptr;
+MppEncoder *webcam_encoder = nullptr;
+UvcSink *webcam_sink = nullptr;
+MppEncoderParams webcam_params = []
+{
+	MppEncoderParams p;
+	p.codec = VideoCodec::MJPEG;
+	p.resolution = EncResolution::Res720p;
+	p.fps = 30;
+	p.quality = 80;
+	return p;
 }();
 bool webcam_enabled = false;
-bool webcam_osd     = false;
+bool webcam_osd = false;
 static bool webcam_autostart = false;
-static pthread_t g_tid_webcam_enc   = 0;
+static pthread_t g_tid_webcam_enc = 0;
 static pthread_t g_tid_webcam_fproc = 0;
 
 // Decoded frame geometry – updated in init_buffer(), used in __FRAME_THREAD__
@@ -171,12 +179,22 @@ float live_colortrans_gain = 2.5f;
 gamma_lut_controller lut_ctrl;
 
 // Helper: get target width/height for the current re-encode resolution setting.
-static void reenc_target_dims(uint32_t &w, uint32_t &h) {
-    if (reenc_params.resolution == EncResolution::Res720p) { w = 1280; h = 720; }
-    else { w = 1920; h = 1080; }
+static void reenc_target_dims(uint32_t &w, uint32_t &h)
+{
+	if (reenc_params.resolution == EncResolution::Res720p)
+	{
+		w = 1280;
+		h = 720;
+	}
+	else
+	{
+		w = 1920;
+		h = 1080;
+	}
 }
 
-void init_buffer(MppFrame frame) {
+void init_buffer(MppFrame frame)
+{
 	output_list->video_frm_width = mpp_frame_get_width(frame);
 	output_list->video_frm_height = mpp_frame_get_height(frame);
 	RK_U32 hor_stride = mpp_frame_get_hor_stride(frame);
@@ -193,7 +211,7 @@ void init_buffer(MppFrame frame) {
 	output_list->video_fb_x = 0;
 	output_list->video_fb_y = 0;
 	output_list->video_fb_width = output_list->mode.hdisplay;
-	output_list->video_fb_height =output_list->mode.vdisplay;	
+	output_list->video_fb_height = output_list->mode.vdisplay;
 
 	osd_publish_uint_fact("video.width", NULL, 0, output_list->video_frm_width);
 	osd_publish_uint_fact("video.height", NULL, 0, output_list->video_frm_height);
@@ -201,23 +219,30 @@ void init_buffer(MppFrame frame) {
 	// Drain any decoder-buffer refs held by the encoder pacer before freeing
 	// the group.  Without this the group teardown races with the pacer's copy
 	// loop and the buffer fds become invalid while still in use.
-	if (frame_proc) frame_proc->drain_decoder_refs();
-	if (webcam_frame_proc) webcam_frame_proc->drain_decoder_refs();
+	if (frame_proc)
+		frame_proc->drain_decoder_refs();
+	if (webcam_frame_proc)
+		webcam_frame_proc->drain_decoder_refs();
 
-	if (mpi.frm_grp) {
+	if (mpi.frm_grp)
+	{
 		spdlog::debug("Freeing current mpp_buffer_group");
 
 		// First clean up all DRM resources for existing frames
-		for (int i = 0; i < MAX_FRAMES; i++) {
-			if (mpi.frame_to_drm[i].fb_id) {
+		for (int i = 0; i < MAX_FRAMES; i++)
+		{
+			if (mpi.frame_to_drm[i].fb_id)
+			{
 				drmModeRmFB(drm_fd, mpi.frame_to_drm[i].fb_id);
 				mpi.frame_to_drm[i].fb_id = 0;
 			}
-			if (mpi.frame_to_drm[i].prime_fd >= 0) {
+			if (mpi.frame_to_drm[i].prime_fd >= 0)
+			{
 				close(mpi.frame_to_drm[i].prime_fd);
 				mpi.frame_to_drm[i].prime_fd = -1;
 			}
-			if (mpi.frame_to_drm[i].handle) {
+			if (mpi.frame_to_drm[i].handle)
+			{
 				struct drm_mode_destroy_dumb dmd = {
 					.handle = mpi.frame_to_drm[i].handle,
 				};
@@ -225,50 +250,54 @@ void init_buffer(MppFrame frame) {
 				mpi.frame_to_drm[i].handle = 0;
 			}
 		}
-		
+
 		mpp_buffer_group_clear(mpi.frm_grp);
-		mpp_buffer_group_put(mpi.frm_grp);  // This is important to release the group
+		mpp_buffer_group_put(mpi.frm_grp); // This is important to release the group
 		mpi.frm_grp = NULL;
 	}
 
 	// create new external frame group and allocate (commit flow) new DRM buffers and DRM FB
 	int ret = mpp_buffer_group_get_external(&mpi.frm_grp, MPP_BUFFER_TYPE_DRM);
-	assert(!ret);			
+	assert(!ret);
 
-	for (int i=0; i<MAX_FRAMES; i++) {
-		
+	for (int i = 0; i < MAX_FRAMES; i++)
+	{
+
 		// new DRM buffer
 		struct drm_mode_create_dumb dmcd;
 		memset(&dmcd, 0, sizeof(dmcd));
-		dmcd.bpp = fmt==MPP_FMT_YUV420SP?8:10;
+		dmcd.bpp = fmt == MPP_FMT_YUV420SP ? 8 : 10;
 		dmcd.width = hor_stride;
-		dmcd.height = ver_stride*2; // documentation say not v*2/3 but v*2 (additional info included)
-		do {
+		dmcd.height = ver_stride * 2; // documentation say not v*2/3 but v*2 (additional info included)
+		do
+		{
 			ret = ioctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dmcd);
 		} while (ret == -1 && (errno == EINTR || errno == EAGAIN));
 		assert(!ret);
 		// assert(dmcd.pitch==(fmt==MPP_FMT_YUV420SP?hor_stride:hor_stride*10/8));
 		// assert(dmcd.size==(fmt == MPP_FMT_YUV420SP?hor_stride:hor_stride*10/8)*ver_stride*2);
 		mpi.frame_to_drm[i].handle = dmcd.handle;
-		
+
 		// commit DRM buffer to frame group
 		struct drm_prime_handle dph;
 		memset(&dph, 0, sizeof(struct drm_prime_handle));
 		dph.handle = dmcd.handle;
 		dph.fd = -1;
-		do {
+		do
+		{
 			ret = ioctl(drm_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &dph);
 		} while (ret == -1 && (errno == EINTR || errno == EAGAIN));
 		assert(!ret);
 		MppBufferInfo info;
 		memset(&info, 0, sizeof(info));
 		info.type = MPP_BUFFER_TYPE_DRM;
-		info.size = dmcd.width*dmcd.height;
+		info.size = dmcd.width * dmcd.height;
 		info.fd = dph.fd;
 		ret = mpp_buffer_commit(mpi.frm_grp, &info);
 		assert(!ret);
-		mpi.frame_to_drm[i].prime_fd = info.fd; // dups fd						
-		if (dph.fd != info.fd) {
+		mpi.frame_to_drm[i].prime_fd = info.fd; // dups fd
+		if (dph.fd != info.fd)
+		{
 			ret = close(dph.fd);
 			assert(!ret);
 		}
@@ -280,7 +309,7 @@ void init_buffer(MppFrame frame) {
 		memset(offsets, 0, sizeof(offsets));
 		handles[0] = mpi.frame_to_drm[i].handle;
 		offsets[0] = 0;
-		pitches[0] = hor_stride;						
+		pitches[0] = hor_stride;
 		handles[1] = mpi.frame_to_drm[i].handle;
 		offsets[1] = pitches[0] * ver_stride;
 		pitches[1] = pitches[0];
@@ -296,11 +325,14 @@ void init_buffer(MppFrame frame) {
 	assert(ret >= 0);
 
 	// dvr setup
-	if (dvr_raw != NULL) {
+	if (dvr_raw != NULL)
+	{
 		dvr_raw->set_video_params(output_list->video_frm_width, output_list->video_frm_height, codec);
 	}
-	if (dvr_reenc_inst != NULL) {
-		uint32_t rw, rh; reenc_target_dims(rw, rh);
+	if (dvr_reenc_inst != NULL)
+	{
+		uint32_t rw, rh;
+		reenc_target_dims(rw, rh);
 		dvr_reenc_inst->set_video_params(rw, rh, reenc_params.codec);
 	}
 }
@@ -312,18 +344,20 @@ void init_buffer(MppFrame frame) {
 
 void *__FRAME_THREAD__(void *param)
 {
-	SchedulingHelper::set_thread_params_max_realtime("FRAME_THREAD",SchedulingHelper::PRIORITY_REALTIME_MID);
+	SchedulingHelper::set_thread_params_max_realtime("FRAME_THREAD", SchedulingHelper::PRIORITY_REALTIME_MID);
 	int i, ret;
-	MppFrame  frame  = NULL;
+	MppFrame frame = NULL;
 	uint64_t last_frame_time;
 	pthread_setname_np(pthread_self(), "__FRAME");
 
-	while (!frm_eos) {
+	while (!frm_eos)
+	{
 		struct timespec ts, ats;
 
 		assert(!frame);
 		pthread_mutex_lock(&mpp_reinit_mutex);
-		if (mpp_reinit_pending.load(std::memory_order_acquire)) {
+		if (mpp_reinit_pending.load(std::memory_order_acquire))
+		{
 			// Decoder is being reinitialized — release lock and wait
 			pthread_mutex_unlock(&mpp_reinit_mutex);
 			usleep(5000);
@@ -331,9 +365,11 @@ void *__FRAME_THREAD__(void *param)
 		}
 		ret = mpi.mpi->decode_get_frame(mpi.ctx, &frame);
 		pthread_mutex_unlock(&mpp_reinit_mutex);
-		if (mpp_reinit_pending.load(std::memory_order_acquire)) {
+		if (mpp_reinit_pending.load(std::memory_order_acquire))
+		{
 			// Reinit started while we were blocked — discard result
-			if (frame) {
+			if (frame)
+			{
 				mpp_frame_deinit(&frame);
 				frame = NULL;
 			}
@@ -341,43 +377,57 @@ void *__FRAME_THREAD__(void *param)
 		}
 		assert(!ret);
 		clock_gettime(CLOCK_MONOTONIC, &ats);
-		if (frame) {
-			if (mpp_frame_get_info_change(frame)) {
+		if (frame)
+		{
+			if (mpp_frame_get_info_change(frame))
+			{
 				// new resolution
 				init_buffer(frame);
-			} else {
+			}
+			else
+			{
 				// regular frame received
 				idr_notify_decoded_frame();
 				const RK_U32 errinfo = mpp_frame_get_errinfo(frame);
 				const RK_U32 discard = mpp_frame_get_discard(frame);
-				if (errinfo || discard) {
-					const char* reason = "decoder-issue";
-					if (errinfo && discard) {
+				if (errinfo || discard)
+				{
+					const char *reason = "decoder-issue";
+					if (errinfo && discard)
+					{
 						reason = "decoder-errinfo+discard";
-					} else if (errinfo) {
+					}
+					else if (errinfo)
+					{
 						reason = "decoder-errinfo";
-					} else if (discard) {
+					}
+					else if (discard)
+					{
 						reason = "decoder-discard";
 					}
 					idr_request_decoder_issue(reason);
 				}
-				if (!mpi.first_frame_ts.tv_sec) {
+				if (!mpi.first_frame_ts.tv_sec)
+				{
 					ts = ats;
 					mpi.first_frame_ts = ats;
 				}
 
 				MppBuffer buffer = mpp_frame_get_buffer(frame);
-				if (buffer && !discard) {
+				if (buffer && !discard)
+				{
 					output_list->video_poc = mpp_frame_get_poc(frame);
-					uint64_t feed_data_ts =  mpp_frame_get_pts(frame);
+					uint64_t feed_data_ts = mpp_frame_get_pts(frame);
 
 					MppBufferInfo info;
 					ret = mpp_buffer_info_get(buffer, &info);
 					assert(!ret);
-					for (i=0; i<MAX_FRAMES; i++) {
-						if (mpi.frame_to_drm[i].prime_fd == info.fd) break;
+					for (i = 0; i < MAX_FRAMES; i++)
+					{
+						if (mpi.frame_to_drm[i].prime_fd == info.fd)
+							break;
 					}
-					assert(i!=MAX_FRAMES);
+					assert(i != MAX_FRAMES);
 
 					ts = ats;
 
@@ -385,62 +435,69 @@ void *__FRAME_THREAD__(void *param)
 					ret = pthread_mutex_lock(&video_mutex);
 					assert(!ret);
 					output_list->video_fb_id = mpi.frame_to_drm[i].fb_id;
-                    //output_list->video_fb_index=i;
-                    output_list->decoding_pts=feed_data_ts;
+					// output_list->video_fb_index=i;
+					output_list->decoding_pts = feed_data_ts;
 					ret = pthread_cond_signal(&video_cond);
 					assert(!ret);
 					ret = pthread_mutex_unlock(&video_mutex);
 					assert(!ret);
 
 					if ((frame_proc != nullptr || webcam_frame_proc != nullptr) &&
-					    decoded_hor_stride > 0 && decoded_ver_stride > 0) {
+						decoded_hor_stride > 0 && decoded_ver_stride > 0)
+					{
 						MppFrameFormat fmt = mpp_frame_get_fmt(frame);
 						// push_latest() takes its own buffer ref, so fanning out to
 						// both the DVR and webcam pacers is ref-safe.
 						if (frame_proc != nullptr)
 							frame_proc->push_latest(buffer,
-							                       output_list->video_frm_width,
-							                       output_list->video_frm_height,
-							                       decoded_hor_stride,
-							                       decoded_ver_stride, fmt);
+													output_list->video_frm_width,
+													output_list->video_frm_height,
+													decoded_hor_stride,
+													decoded_ver_stride, fmt);
 						if (webcam_frame_proc != nullptr)
 							webcam_frame_proc->push_latest(buffer,
-							                       output_list->video_frm_width,
-							                       output_list->video_frm_height,
-							                       decoded_hor_stride,
-							                       decoded_ver_stride, fmt);
+														   output_list->video_frm_width,
+														   output_list->video_frm_height,
+														   decoded_hor_stride,
+														   decoded_ver_stride, fmt);
 					}
-				} else {
+				}
+				else
+				{
 					spdlog::warn("dropping frame (buffer={}, discard={})", buffer ? "ok" : "null", discard);
 				}
 			}
-			
+
 			frm_eos = mpp_frame_get_eos(frame);
 			mpp_frame_deinit(&frame);
 			frame = NULL;
-		} else assert(0);
+		}
+		else
+			assert(0);
 	}
 	spdlog::info("Frame thread done.");
 	return nullptr;
 }
 
-
 void *__DISPLAY_THREAD__(void *param)
 {
 	int ret;
-	SchedulingHelper::set_thread_params_max_realtime("DISPLAY_THREAD",SchedulingHelper::PRIORITY_REALTIME_MID);
+	SchedulingHelper::set_thread_params_max_realtime("DISPLAY_THREAD", SchedulingHelper::PRIORITY_REALTIME_MID);
 	pthread_setname_np(pthread_self(), "__DISPLAY");
 
-	while (!frm_eos) {
+	while (!frm_eos)
+	{
 		int fb_id;
 		bool osd_update;
-		
+
 		ret = pthread_mutex_lock(&video_mutex);
 		assert(!ret);
-		while (output_list->video_fb_id==0 && !osd_update_ready) {
+		while (output_list->video_fb_id == 0 && !osd_update_ready)
+		{
 			pthread_cond_wait(&video_cond, &video_mutex);
 			assert(!ret);
-			if (output_list->video_fb_id == 0 && frm_eos) {
+			if (output_list->video_fb_id == 0 && frm_eos)
+			{
 				ret = pthread_mutex_unlock(&video_mutex);
 				assert(!ret);
 				goto end;
@@ -449,8 +506,8 @@ void *__DISPLAY_THREAD__(void *param)
 		fb_id = output_list->video_fb_id;
 		osd_update = osd_update_ready;
 
-        uint64_t decoding_pts=fb_id != 0 ? output_list->decoding_pts : get_time_ms();
-		output_list->video_fb_id=0;
+		uint64_t decoding_pts = fb_id != 0 ? output_list->decoding_pts : get_time_ms();
+		output_list->video_fb_id = 0;
 		osd_update_ready = false;
 		ret = pthread_mutex_unlock(&video_mutex);
 		assert(!ret);
@@ -461,45 +518,52 @@ void *__DISPLAY_THREAD__(void *param)
 
 		// show DRM FB in plane
 		uint32_t flags = DRM_MODE_ATOMIC_NONBLOCK;
-		if (fb_id != 0) {
+		if (fb_id != 0)
+		{
 			// Steady-state flips only update plane FB_IDs — no modeset is
 			// needed, so commit with flags=0 (blocking, vsynced) instead of
 			// ALLOW_MODESET, which permits heavier driver validation paths.
 			flags = disable_vsync ? DRM_MODE_ATOMIC_NONBLOCK : 0;
 			ret = set_drm_object_property(output_list->video_request, &output_list->video_plane, "FB_ID", fb_id);
-			assert(ret>0);
+			assert(ret > 0);
 		}
 
-		if(enable_osd) {
+		if (enable_osd)
+		{
 			ret = pthread_mutex_lock(&osd_mutex);
 			assert(!ret);
 			if (enable_live_colortrans)
 				ret = set_drm_object_property(output_list->video_request, &output_list->osd_plane, "FB_ID", output_list->osd_bufs[output_list->osd_buf_switch].gl_fb_id);
-			else 
+			else
 				ret = set_drm_object_property(output_list->video_request, &output_list->osd_plane, "FB_ID", output_list->osd_bufs[output_list->osd_buf_switch].fb);
-			assert(ret>0);
+			assert(ret > 0);
 		}
 		int commit_ret = drmModeAtomicCommit(drm_fd, output_list->video_request, flags, NULL);
 		ret = pthread_mutex_unlock(&osd_mutex);
 		assert(!ret);
-		if (commit_ret) {
-			if (commit_ret == -EBUSY && (flags & DRM_MODE_ATOMIC_NONBLOCK)) {
+		if (commit_ret)
+		{
+			if (commit_ret == -EBUSY && (flags & DRM_MODE_ATOMIC_NONBLOCK))
+			{
 				// Previous flip still pending — this frame is dropped.
 				spdlog::debug("Atomic commit EBUSY, frame dropped");
-			} else {
+			}
+			else
+			{
 				static uint64_t last_commit_warn_ms = 0;
 				uint64_t warn_now = get_time_ms();
-				if (warn_now - last_commit_warn_ms > 1000) {
+				if (warn_now - last_commit_warn_ms > 1000)
+				{
 					last_commit_warn_ms = warn_now;
 					spdlog::warn("drmModeAtomicCommit failed: {}", commit_ret);
 				}
 			}
 		}
 		osd_publish_uint_fact("video.displayed_frame", NULL, 0, 1);
-		uint64_t decode_and_handover_display_ms=get_time_ms()-decoding_pts;
+		uint64_t decode_and_handover_display_ms = get_time_ms() - decoding_pts;
 		osd_publish_uint_fact("video.decode_and_handover_ms", NULL, 0, decode_and_handover_display_ms);
 	}
-end:	
+end:
 	spdlog::info("Display thread done.");
 	return nullptr;
 }
@@ -516,861 +580,1051 @@ void sig_handler(int signum)
 	mavlink_thread_signal++;
 	wfb_thread_signal++;
 	osd_thread_signal++;
-	if (dvr_raw != NULL) {
+	if (dvr_raw != NULL)
+	{
 		dvr_raw->shutdown();
 	}
-	if (dvr_reenc_inst != NULL) {
+	if (dvr_reenc_inst != NULL)
+	{
 		dvr_reenc_inst->shutdown();
 	}
-	if (frame_proc != NULL) {
+	if (frame_proc != NULL)
+	{
 		frame_proc->shutdown();
 	}
-	if (reencoder != NULL) {
+	if (reencoder != NULL)
+	{
 		reencoder->shutdown();
 	}
-	if (webcam_frame_proc != NULL) {
+	if (webcam_frame_proc != NULL)
+	{
 		webcam_frame_proc->shutdown();
 	}
-	if (webcam_encoder != NULL) {
+	if (webcam_encoder != NULL)
+	{
 		webcam_encoder->shutdown();
 	}
-	if (webcam_sink != NULL) {
+	if (webcam_sink != NULL)
+	{
 		webcam_sink->stop();
 	}
 	return_value = signum;
 }
 
-void sigusr1_handler(int signum) {
+void sigusr1_handler(int signum)
+{
 	spdlog::info("Received signal {}", signum);
 	bool was_enabled = dvr_enabled;
-	if (was_enabled) {
+	if (was_enabled)
+	{
 		// Stopping
-		if (dvr_raw) dvr_raw->stop_recording();
-		if (dvr_reenc_inst) dvr_reenc_inst->stop_recording();
+		if (dvr_raw)
+			dvr_raw->stop_recording();
+		if (dvr_reenc_inst)
+			dvr_reenc_inst->stop_recording();
 		dvr_enabled = 0;
 		osd_publish_bool_fact("dvr.recording", NULL, 0, false);
-	} else {
+	}
+	else
+	{
 		// Starting
 		dvr_enabled = 1;
 		osd_publish_bool_fact("dvr.recording", NULL, 0, true);
-		if (dvr_raw) dvr_raw->start_recording();
-		if (dvr_reenc_inst) dvr_reenc_inst->start_recording();
-		if (reencoder) reencoder->request_idr();
+		if (dvr_raw)
+			dvr_raw->start_recording();
+		if (dvr_reenc_inst)
+			dvr_reenc_inst->start_recording();
+		if (reencoder)
+			reencoder->request_idr();
 	}
 }
 
-void sigusr2_handler(int signum) {
-    // Toggle the disable_vsync flag
-    disable_vsync = disable_vsync ^ 1;
+void sigusr2_handler(int signum)
+{
+	// Toggle the disable_vsync flag
+	disable_vsync = disable_vsync ^ 1;
 
-    // Open the file for writing
-    std::ofstream outFile("/run/pixelpilot.msg");
-    if (!outFile.is_open()) {
-        spdlog::error("Error opening file!");
-        return; // Exit the function if the file cannot be opened
-    }
+	// Open the file for writing
+	std::ofstream outFile("/run/pixelpilot.msg");
+	if (!outFile.is_open())
+	{
+		spdlog::error("Error opening file!");
+		return; // Exit the function if the file cannot be opened
+	}
 
-    // Write the formatted text to the file
-    outFile << "disable_vsync: " << std::boolalpha << disable_vsync << std::endl;
-    outFile.close();
+	// Write the formatted text to the file
+	outFile << "disable_vsync: " << std::boolalpha << disable_vsync << std::endl;
+	outFile.close();
 
-    // Log the new state of disable_vsync
-    spdlog::info("disable_vsync: {}", disable_vsync);
+	// Log the new state of disable_vsync
+	spdlog::info("disable_vsync: {}", disable_vsync);
 }
 
 // Helper: create a filename template with a suffix inserted before the extension.
 // Returns a strdup'd string — caller must free.
-static char* dvr_template_with_suffix(const char *tpl, const char *suffix) {
-    std::string s(tpl);
-    auto dot = s.rfind('.');
-    if (dot != std::string::npos)
-        s.insert(dot, suffix);
-    else
-        s.append(suffix);
-    return strdup(s.c_str());
+static char *dvr_template_with_suffix(const char *tpl, const char *suffix)
+{
+	std::string s(tpl);
+	auto dot = s.rfind('.');
+	if (dot != std::string::npos)
+		s.insert(dot, suffix);
+	else
+		s.append(suffix);
+	return strdup(s.c_str());
 }
 
 // Shutdown helper for DVR + encoder teardown context.
-struct DvrShutdownCtx {
-    Dvr          *dvr_inst;
-    FrameProcessor *p;
-    MppEncoder   *e;
-    pthread_t     td, tp, te;
+struct DvrShutdownCtx
+{
+	Dvr *dvr_inst;
+	FrameProcessor *p;
+	MppEncoder *e;
+	pthread_t td, tp, te;
 };
 
-static void *dvr_shutdown_worker(void *arg) {
-    auto *ctx = static_cast<DvrShutdownCtx *>(arg);
-    if (ctx->tp) pthread_join(ctx->tp, nullptr);
-    if (ctx->te) pthread_join(ctx->te, nullptr);
-    if (ctx->td) pthread_join(ctx->td, nullptr);
-    delete ctx->p;
-    delete ctx->e;
-    delete ctx->dvr_inst;
-    delete ctx;
-    return nullptr;
+static void *dvr_shutdown_worker(void *arg)
+{
+	auto *ctx = static_cast<DvrShutdownCtx *>(arg);
+	if (ctx->tp)
+		pthread_join(ctx->tp, nullptr);
+	if (ctx->te)
+		pthread_join(ctx->te, nullptr);
+	if (ctx->td)
+		pthread_join(ctx->td, nullptr);
+	delete ctx->p;
+	delete ctx->e;
+	delete ctx->dvr_inst;
+	delete ctx;
+	return nullptr;
 }
 
-static void webcam_target_dims(uint32_t &w, uint32_t &h) {
-    if (webcam_params.resolution == EncResolution::Res720p) { w = 1280; h = 720; }
-    else { w = 1920; h = 1080; }
+static void webcam_target_dims(uint32_t &w, uint32_t &h)
+{
+	if (webcam_params.resolution == EncResolution::Res720p)
+	{
+		w = 1280;
+		h = 720;
+	}
+	else
+	{
+		w = 1920;
+		h = 1080;
+	}
 }
 
 // Detached teardown for the webcam pipeline (mirrors dvr_shutdown_worker): join
 // the pacer + encoder threads (so no callback can touch the sink), then delete
 // everything and drop the gadget. Runs off the UI thread to avoid blocking on joins.
-struct WebcamShutdownCtx {
-    FrameProcessor *p;
-    MppEncoder     *e;
-    UvcSink        *s;
-    pthread_t       tp, te;
+struct WebcamShutdownCtx
+{
+	FrameProcessor *p;
+	MppEncoder *e;
+	UvcSink *s;
+	pthread_t tp, te;
 };
-static void *webcam_shutdown_worker(void *arg) {
-    auto *ctx = static_cast<WebcamShutdownCtx *>(arg);
-    if (ctx->tp) pthread_join(ctx->tp, nullptr);
-    if (ctx->te) pthread_join(ctx->te, nullptr);
-    delete ctx->p;
-    delete ctx->e;
-    if (ctx->s) { ctx->s->stop(); delete ctx->s; }
-    system("/usr/sbin/webcam-gadget down");
-    delete ctx;
-    return nullptr;
+static void *webcam_shutdown_worker(void *arg)
+{
+	auto *ctx = static_cast<WebcamShutdownCtx *>(arg);
+	if (ctx->tp)
+		pthread_join(ctx->tp, nullptr);
+	if (ctx->te)
+		pthread_join(ctx->te, nullptr);
+	delete ctx->p;
+	delete ctx->e;
+	if (ctx->s)
+	{
+		ctx->s->stop();
+		delete ctx->s;
+	}
+	system("/usr/sbin/webcam-gadget down");
+	delete ctx;
+	return nullptr;
 }
 
 // C-compatible interface for gsmenu live control of the DVR.
-extern "C" {
-    void dvr_reenc_set_fps(int fps) {
-        if (dvr_reenc_inst) dvr_reenc_inst->stop_recording();
-        reenc_params.fps = fps;
-        if (dvr_reenc_inst) dvr_reenc_inst->set_video_framerate(fps);
-        if (frame_proc) frame_proc->set_fps(fps);
-        if (reencoder) reencoder->set_fps(fps);
-    }
-    void dvr_reenc_set_osd(int enabled) {
-        dvr_osd = (bool)enabled;
-        if (!enabled && frame_proc)
-            frame_proc->set_osd_blend(-1, 0, 0, 0);
-    }
+extern "C"
+{
+	void dvr_reenc_set_fps(int fps)
+	{
+		if (dvr_reenc_inst)
+			dvr_reenc_inst->stop_recording();
+		reenc_params.fps = fps;
+		if (dvr_reenc_inst)
+			dvr_reenc_inst->set_video_framerate(fps);
+		if (frame_proc)
+			frame_proc->set_fps(fps);
+		if (reencoder)
+			reencoder->set_fps(fps);
+	}
+	void dvr_reenc_set_osd(int enabled)
+	{
+		dvr_osd = (bool)enabled;
+		if (!enabled && frame_proc)
+			frame_proc->set_osd_blend(-1, 0, 0, 0);
+	}
 
-    void dvr_reenc_notify_colortrans(int enabled) {
-        if (!frame_proc) return;
-        if (enabled)
-            frame_proc->set_color_correction(live_colortrans_gain, live_colortrans_offset, drm_fd);
-        else
-            frame_proc->set_color_correction_enabled(false);
-    }
-    int dvr_reenc_get_fps(void)     { return reenc_params.fps; }
-    int dvr_reenc_get_bitrate(void) { return reenc_params.bitrate_kbps; }
-    int dvr_reenc_get_osd(void)     { return (int)dvr_osd; }
-    int dvr_reenc_get_codec(void)   { return (int)reenc_params.codec - 1; } // 0=h264, 1=h265
-    int dvr_reenc_get_resolution(void) { return (int)reenc_params.resolution; } // 0=720p, 1=1080p
+	void dvr_reenc_notify_colortrans(int enabled)
+	{
+		if (!frame_proc)
+			return;
+		if (enabled)
+			frame_proc->set_color_correction(live_colortrans_gain, live_colortrans_offset, drm_fd);
+		else
+			frame_proc->set_color_correction_enabled(false);
+	}
+	int dvr_reenc_get_fps(void) { return reenc_params.fps; }
+	int dvr_reenc_get_bitrate(void) { return reenc_params.bitrate_kbps; }
+	int dvr_reenc_get_osd(void) { return (int)dvr_osd; }
+	int dvr_reenc_get_codec(void) { return (int)reenc_params.codec - 1; }		// 0=h264, 1=h265
+	int dvr_reenc_get_resolution(void) { return (int)reenc_params.resolution; } // 0=720p, 1=1080p
 
-    int  dvr_get_mode(void)  { return (int)dvr_mode; }
-    // Deprecated — use dvr_get_mode() instead
-    int  dvr_reenc_is_reenc(void) { return dvr_mode != DVR_MODE_RAW; }
+	int dvr_get_mode(void) { return (int)dvr_mode; }
+	// Deprecated — use dvr_get_mode() instead
+	int dvr_reenc_is_reenc(void) { return dvr_mode != DVR_MODE_RAW; }
 
-    void dvr_set_max_size(int mb) {
-        dvr_max_file_size = (int64_t)mb * 1000000LL;
-        if (dvr_raw) dvr_raw->set_max_file_size(dvr_max_file_size);
-        if (dvr_reenc_inst) dvr_reenc_inst->set_max_file_size(dvr_max_file_size);
-        spdlog::info("DVR max file size set to {} MB", mb);
-    }
-    int dvr_get_max_size(void) { return (int)(dvr_max_file_size / 1000000LL); }
+	void dvr_set_max_size(int mb)
+	{
+		dvr_max_file_size = (int64_t)mb * 1000000LL;
+		if (dvr_raw)
+			dvr_raw->set_max_file_size(dvr_max_file_size);
+		if (dvr_reenc_inst)
+			dvr_reenc_inst->set_max_file_size(dvr_max_file_size);
+		spdlog::info("DVR max file size set to {} MB", mb);
+	}
+	int dvr_get_max_size(void) { return (int)(dvr_max_file_size / 1000000LL); }
 
-    void drm_set_video_scale(float factor) {
-        if (output_list) {
-            output_list->video_scale_factor = factor;
-            modeset_apply_video_scale(drm_fd, output_list);
-        }
-    }
+	void drm_set_video_scale(float factor)
+	{
+		if (output_list)
+		{
+			output_list->video_scale_factor = factor;
+			modeset_apply_video_scale(drm_fd, output_list);
+		}
+	}
 
-    void dvr_reenc_set_resolution(int idx) {
-        if (dvr_reenc_inst) dvr_reenc_inst->stop_recording();
-        reenc_params.resolution = (EncResolution)idx;
-        if (frame_proc) frame_proc->set_resolution(reenc_params.resolution);
-        if (dvr_reenc_inst) {
-            uint32_t rw, rh; reenc_target_dims(rw, rh);
-            dvr_reenc_inst->set_video_params(rw, rh, reenc_params.codec);
-        }
-    }
+	void dvr_reenc_set_resolution(int idx)
+	{
+		if (dvr_reenc_inst)
+			dvr_reenc_inst->stop_recording();
+		reenc_params.resolution = (EncResolution)idx;
+		if (frame_proc)
+			frame_proc->set_resolution(reenc_params.resolution);
+		if (dvr_reenc_inst)
+		{
+			uint32_t rw, rh;
+			reenc_target_dims(rw, rh);
+			dvr_reenc_inst->set_video_params(rw, rh, reenc_params.codec);
+		}
+	}
 
-    void dvr_reenc_set_bitrate(int kbps) {
-        reenc_params.bitrate_kbps = kbps;
-        if (reencoder) reencoder->set_bitrate(kbps);
-    }
+	void dvr_reenc_set_bitrate(int kbps)
+	{
+		reenc_params.bitrate_kbps = kbps;
+		if (reencoder)
+			reencoder->set_bitrate(kbps);
+	}
 
-    void dvr_reenc_set_codec(int idx) {
-        if (dvr_reenc_inst) dvr_reenc_inst->stop_recording();
-        VideoCodec vc = (idx == 1) ? VideoCodec::H265 : VideoCodec::H264;
-        reenc_params.codec = vc;
-        if (reencoder) reencoder->set_codec(vc);
-        if (dvr_reenc_inst) {
-            uint32_t rw, rh; reenc_target_dims(rw, rh);
-            dvr_reenc_inst->set_video_params(rw, rh, vc);
-        }
-    }
+	void dvr_reenc_set_codec(int idx)
+	{
+		if (dvr_reenc_inst)
+			dvr_reenc_inst->stop_recording();
+		VideoCodec vc = (idx == 1) ? VideoCodec::H265 : VideoCodec::H264;
+		reenc_params.codec = vc;
+		if (reencoder)
+			reencoder->set_codec(vc);
+		if (dvr_reenc_inst)
+		{
+			uint32_t rw, rh;
+			reenc_target_dims(rw, rh);
+			dvr_reenc_inst->set_video_params(rw, rh, vc);
+		}
+	}
 
-    void dvr_start_all(void) {
-        dvr_enabled = 1;
-        osd_publish_bool_fact("dvr.recording", NULL, 0, true);
-        if (dvr_raw) dvr_raw->start_recording();
-        if (dvr_reenc_inst) dvr_reenc_inst->start_recording();
-        if (reencoder) reencoder->request_idr();
-    }
+	void dvr_start_all(void)
+	{
+		dvr_enabled = 1;
+		osd_publish_bool_fact("dvr.recording", NULL, 0, true);
+		if (dvr_raw)
+			dvr_raw->start_recording();
+		if (dvr_reenc_inst)
+			dvr_reenc_inst->start_recording();
+		if (reencoder)
+			reencoder->request_idr();
+	}
 
-    void dvr_stop_all(void) {
-        if (dvr_raw) dvr_raw->stop_recording();
-        if (dvr_reenc_inst) dvr_reenc_inst->stop_recording();
-        dvr_enabled = 0;
-        osd_publish_bool_fact("dvr.recording", NULL, 0, false);
-    }
+	void dvr_stop_all(void)
+	{
+		if (dvr_raw)
+			dvr_raw->stop_recording();
+		if (dvr_reenc_inst)
+			dvr_reenc_inst->stop_recording();
+		dvr_enabled = 0;
+		osd_publish_bool_fact("dvr.recording", NULL, 0, false);
+	}
 
-    // ── USB webcam (UVC) live control ───────────────────────────────────────
-    // Toggle the webcam pipeline. On: bring up the gadget (auto-detect UDC),
-    // then create MJPEG encoder + pacer + UVC sink. Off: tear down + drop gadget.
-    void webcam_set_enabled(int on) {
-        if ((bool)on == webcam_enabled) return;
-        if (on) {
-            webcam_params.codec = VideoCodec::MJPEG;
-            uint32_t ww, wh; webcam_target_dims(ww, wh);
+	// ── USB webcam (UVC) live control ───────────────────────────────────────
+	// Toggle the webcam pipeline. On: bring up the gadget (auto-detect UDC),
+	// then create MJPEG encoder + pacer + UVC sink. Off: tear down + drop gadget.
+	void webcam_set_enabled(int on)
+	{
+		if ((bool)on == webcam_enabled)
+			return;
+		if (on)
+		{
+			webcam_params.codec = VideoCodec::MJPEG;
+			uint32_t ww, wh;
+			webcam_target_dims(ww, wh);
 
-            // Bring up the gadget for exactly this resolution/fps so the configfs
-            // descriptors, the UVC sink, and the encoder all agree on one frame.
-            char cmd[160];
-            snprintf(cmd, sizeof(cmd), "/usr/sbin/webcam-gadget up %u %u %d",
-                     ww, wh, webcam_params.fps);
-            if (system(cmd) != 0)
-                spdlog::warn("webcam-gadget up returned non-zero (continuing)");
+			// Bring up the gadget for exactly this resolution/fps so the configfs
+			// descriptors, the UVC sink, and the encoder all agree on one frame.
+			char cmd[160];
+			snprintf(cmd, sizeof(cmd), "/usr/sbin/webcam-gadget up %u %u %d",
+					 ww, wh, webcam_params.fps);
+			if (system(cmd) != 0)
+				spdlog::warn("webcam-gadget up returned non-zero (continuing)");
 
-            std::vector<UvcSink::FrameSize> frames = {
-                { ww, wh, (uint32_t)webcam_params.fps }
-            };
-            webcam_sink = new UvcSink(frames);
-            if (!webcam_sink->start()) {
-                spdlog::error("webcam: UvcSink failed to start; aborting enable");
-                delete webcam_sink; webcam_sink = nullptr;
-                system("/usr/sbin/webcam-gadget down");
-                return;
-            }
+			std::vector<UvcSink::FrameSize> frames = {
+				{ww, wh, (uint32_t)webcam_params.fps}};
+			webcam_sink = new UvcSink(frames);
+			if (!webcam_sink->start())
+			{
+				spdlog::error("webcam: UvcSink failed to start; aborting enable");
+				delete webcam_sink;
+				webcam_sink = nullptr;
+				system("/usr/sbin/webcam-gadget down");
+				return;
+			}
 
-            webcam_encoder = new MppEncoder(webcam_params,
-                [](std::shared_ptr<std::vector<uint8_t>> jpeg) {
-                    static bool first = true;  // __ENCODER thread only
-                    if (first && jpeg && !jpeg->empty()) {
-                        spdlog::info("webcam: producing MJPEG (~{} bytes/frame)", jpeg->size());
-                        first = false;
-                    }
-                    if (webcam_sink) webcam_sink->submit_frame(jpeg);
-                });
-            pthread_create(&g_tid_webcam_enc, NULL, &MppEncoder::__THREAD__, webcam_encoder);
+			webcam_encoder = new MppEncoder(webcam_params,
+											[](std::shared_ptr<std::vector<uint8_t>> jpeg)
+											{
+												static bool first = true; // __ENCODER thread only
+												if (first && jpeg && !jpeg->empty())
+												{
+													spdlog::info("webcam: producing MJPEG (~{} bytes/frame)", jpeg->size());
+													first = false;
+												}
+												if (webcam_sink)
+													webcam_sink->submit_frame(jpeg);
+											});
+			pthread_create(&g_tid_webcam_enc, NULL, &MppEncoder::__THREAD__, webcam_encoder);
 
-            webcam_frame_proc = new FrameProcessor(webcam_encoder, webcam_params.fps,
-                                                   webcam_params.resolution, drm_fd);
-            // The webcam streams continuously — it must not be gated by the DVR
-            // recording state the way the DVR pacer is.
-            webcam_frame_proc->set_always_active(true);
-            if (enable_live_colortrans)
-                webcam_frame_proc->set_color_correction(live_colortrans_gain,
-                                                        live_colortrans_offset, drm_fd);
-            pthread_create(&g_tid_webcam_fproc, NULL, &FrameProcessor::__THREAD__, webcam_frame_proc);
+			webcam_frame_proc = new FrameProcessor(webcam_encoder, webcam_params.fps,
+												   webcam_params.resolution, drm_fd);
+			// The webcam streams continuously — it must not be gated by the DVR
+			// recording state the way the DVR pacer is.
+			webcam_frame_proc->set_always_active(true);
+			if (enable_live_colortrans)
+				webcam_frame_proc->set_color_correction(live_colortrans_gain,
+														live_colortrans_offset, drm_fd);
+			pthread_create(&g_tid_webcam_fproc, NULL, &FrameProcessor::__THREAD__, webcam_frame_proc);
 
-            webcam_enabled = true;
-            spdlog::info("webcam: enabled {}x{} MJPEG @ {}fps q{}",
-                         ww, wh, webcam_params.fps, webcam_params.quality);
-        } else {
-            // Null the globals first so the decoder/OSD fan-out and encoder
-            // callback stop touching them, then join+delete off the UI thread.
-            FrameProcessor *p = webcam_frame_proc;
-            MppEncoder     *e = webcam_encoder;
-            UvcSink        *s = webcam_sink;
-            pthread_t tp = g_tid_webcam_fproc;
-            pthread_t te = g_tid_webcam_enc;
-            webcam_frame_proc = nullptr;
-            webcam_encoder    = nullptr;
-            webcam_sink       = nullptr;
-            g_tid_webcam_fproc = 0;
-            g_tid_webcam_enc   = 0;
-            webcam_enabled = false;
-            if (p) p->shutdown();
-            if (e) e->shutdown();
-            auto *ctx = new WebcamShutdownCtx{p, e, s, tp, te};
-            pthread_t cleanup_tid;
-            pthread_create(&cleanup_tid, NULL, webcam_shutdown_worker, ctx);
-            pthread_detach(cleanup_tid);
-            spdlog::info("webcam: disabled");
-        }
-    }
+			webcam_enabled = true;
+			spdlog::info("webcam: enabled {}x{} MJPEG @ {}fps q{}",
+						 ww, wh, webcam_params.fps, webcam_params.quality);
+		}
+		else
+		{
+			// Null the globals first so the decoder/OSD fan-out and encoder
+			// callback stop touching them, then join+delete off the UI thread.
+			FrameProcessor *p = webcam_frame_proc;
+			MppEncoder *e = webcam_encoder;
+			UvcSink *s = webcam_sink;
+			pthread_t tp = g_tid_webcam_fproc;
+			pthread_t te = g_tid_webcam_enc;
+			webcam_frame_proc = nullptr;
+			webcam_encoder = nullptr;
+			webcam_sink = nullptr;
+			g_tid_webcam_fproc = 0;
+			g_tid_webcam_enc = 0;
+			webcam_enabled = false;
+			if (p)
+				p->shutdown();
+			if (e)
+				e->shutdown();
+			auto *ctx = new WebcamShutdownCtx{p, e, s, tp, te};
+			pthread_t cleanup_tid;
+			pthread_create(&cleanup_tid, NULL, webcam_shutdown_worker, ctx);
+			pthread_detach(cleanup_tid);
+			spdlog::info("webcam: disabled");
+		}
+	}
 
-    void webcam_set_osd(int enabled) {
-        webcam_osd = (bool)enabled;
-        if (!enabled && webcam_frame_proc)
-            webcam_frame_proc->set_osd_blend(-1, 0, 0, 0);
-    }
+	void webcam_set_osd(int enabled)
+	{
+		webcam_osd = (bool)enabled;
+		if (!enabled && webcam_frame_proc)
+			webcam_frame_proc->set_osd_blend(-1, 0, 0, 0);
+	}
 
-    // Note: a live resolution change updates the encoder output but does NOT
-    // renegotiate the committed UVC frame with the host — toggle the webcam
-    // off/on for the host to pick up the new size.
-    void webcam_set_resolution(int idx) {
-        webcam_params.resolution = (EncResolution)idx;
-        if (webcam_frame_proc) webcam_frame_proc->set_resolution(webcam_params.resolution);
-    }
-    void webcam_set_fps(int fps) {
-        webcam_params.fps = fps;
-        if (webcam_frame_proc) webcam_frame_proc->set_fps(fps);
-        if (webcam_encoder)    webcam_encoder->set_fps(fps);
-    }
-    void webcam_set_quality(int q) {
-        webcam_params.quality = q;
-        if (webcam_encoder) webcam_encoder->set_quality(q);
-    }
+	// Note: a live resolution change updates the encoder output but does NOT
+	// renegotiate the committed UVC frame with the host — toggle the webcam
+	// off/on for the host to pick up the new size.
+	void webcam_set_resolution(int idx)
+	{
+		webcam_params.resolution = (EncResolution)idx;
+		if (webcam_frame_proc)
+			webcam_frame_proc->set_resolution(webcam_params.resolution);
+	}
+	void webcam_set_fps(int fps)
+	{
+		webcam_params.fps = fps;
+		if (webcam_frame_proc)
+			webcam_frame_proc->set_fps(fps);
+		if (webcam_encoder)
+			webcam_encoder->set_fps(fps);
+	}
+	void webcam_set_quality(int q)
+	{
+		webcam_params.quality = q;
+		if (webcam_encoder)
+			webcam_encoder->set_quality(q);
+	}
 
-    int webcam_get_enabled(void)    { return (int)webcam_enabled; }
-    int webcam_get_osd(void)        { return (int)webcam_osd; }
-    int webcam_get_resolution(void) { return (int)webcam_params.resolution; }  // 0=720p,1=1080p
-    int webcam_get_fps(void)        { return webcam_params.fps; }
-    int webcam_get_quality(void)    { return webcam_params.quality; }
+	int webcam_get_enabled(void) { return (int)webcam_enabled; }
+	int webcam_get_osd(void) { return (int)webcam_osd; }
+	int webcam_get_resolution(void) { return (int)webcam_params.resolution; } // 0=720p,1=1080p
+	int webcam_get_fps(void) { return webcam_params.fps; }
+	int webcam_get_quality(void) { return webcam_params.quality; }
 
-    /* C-callable wrapper so the menu (C) can set the raw DVR framerate without
-     * touching the C++ Dvr* directly. */
-    void dvr_set_video_framerate(Dvr* dvr, int f);   /* defined in dvr.cpp */
-    void dvr_set_raw_fps(int fps) {
-        if (dvr_raw) dvr_set_video_framerate(dvr_raw, fps);
-    }
+	/* C-callable wrapper so the menu (C) can set the raw DVR framerate without
+	 * touching the C++ Dvr* directly. */
+	void dvr_set_video_framerate(Dvr *dvr, int f); /* defined in dvr.cpp */
+	void dvr_set_raw_fps(int fps)
+	{
+		if (dvr_raw)
+			dvr_set_video_framerate(dvr_raw, fps);
+	}
 
-    // Switch DVR mode at runtime. Stops any active recording.
-    // mode: 0=raw, 1=reencode, 2=both
-    void dvr_set_mode(int mode) {
-        DvrMode new_mode = (DvrMode)mode;
-        if (new_mode == dvr_mode) return;
+	// Switch DVR mode at runtime. Stops any active recording.
+	// mode: 0=raw, 1=reencode, 2=both
+	void dvr_set_mode(int mode)
+	{
+		DvrMode new_mode = (DvrMode)mode;
+		if (new_mode == dvr_mode)
+			return;
 
-        // Stop any active recording
-        dvr_stop_all();
+		// Stop any active recording
+		dvr_stop_all();
 
-        bool old_has_raw   = (dvr_mode == DVR_MODE_RAW || dvr_mode == DVR_MODE_BOTH);
-        bool old_has_reenc = (dvr_mode == DVR_MODE_REENCODE || dvr_mode == DVR_MODE_BOTH);
-        bool new_has_raw   = (new_mode == DVR_MODE_RAW || new_mode == DVR_MODE_BOTH);
-        bool new_has_reenc = (new_mode == DVR_MODE_REENCODE || new_mode == DVR_MODE_BOTH);
+		bool old_has_raw = (dvr_mode == DVR_MODE_RAW || dvr_mode == DVR_MODE_BOTH);
+		bool old_has_reenc = (dvr_mode == DVR_MODE_REENCODE || dvr_mode == DVR_MODE_BOTH);
+		bool new_has_raw = (new_mode == DVR_MODE_RAW || new_mode == DVR_MODE_BOTH);
+		bool new_has_reenc = (new_mode == DVR_MODE_REENCODE || new_mode == DVR_MODE_BOTH);
 
-        // Tear down encoder pipeline if no longer needed
-        if (old_has_reenc && !new_has_reenc) {
-            FrameProcessor *p  = frame_proc;
-            MppEncoder     *e  = reencoder;
-            Dvr            *d  = dvr_reenc_inst;
-            pthread_t       tp = g_tid_fproc;
-            pthread_t       te = g_tid_enc;
-            pthread_t       td = g_tid_dvr_reenc;
-            frame_proc      = nullptr;
-            reencoder       = nullptr;
-            dvr_reenc_inst  = nullptr;
-            g_tid_fproc     = 0;
-            g_tid_enc       = 0;
-            g_tid_dvr_reenc = 0;
-            if (p) p->shutdown();
-            if (e) e->shutdown();
-            if (d) d->shutdown();
-            auto *ctx = new DvrShutdownCtx{d, p, e, td, tp, te};
-            pthread_t cleanup_tid;
-            pthread_create(&cleanup_tid, NULL, dvr_shutdown_worker, ctx);
-            pthread_detach(cleanup_tid);
-        }
+		// Tear down encoder pipeline if no longer needed
+		if (old_has_reenc && !new_has_reenc)
+		{
+			FrameProcessor *p = frame_proc;
+			MppEncoder *e = reencoder;
+			Dvr *d = dvr_reenc_inst;
+			pthread_t tp = g_tid_fproc;
+			pthread_t te = g_tid_enc;
+			pthread_t td = g_tid_dvr_reenc;
+			frame_proc = nullptr;
+			reencoder = nullptr;
+			dvr_reenc_inst = nullptr;
+			g_tid_fproc = 0;
+			g_tid_enc = 0;
+			g_tid_dvr_reenc = 0;
+			if (p)
+				p->shutdown();
+			if (e)
+				e->shutdown();
+			if (d)
+				d->shutdown();
+			auto *ctx = new DvrShutdownCtx{d, p, e, td, tp, te};
+			pthread_t cleanup_tid;
+			pthread_create(&cleanup_tid, NULL, dvr_shutdown_worker, ctx);
+			pthread_detach(cleanup_tid);
+		}
 
-        // Tear down raw DVR if no longer needed
-        if (old_has_raw && !new_has_raw) {
-            Dvr *d = dvr_raw;
-            pthread_t td = g_tid_dvr_raw;
-            dvr_raw = nullptr;
-            g_tid_dvr_raw = 0;
-            if (d) d->shutdown();
-            auto *ctx = new DvrShutdownCtx{d, nullptr, nullptr, td, 0, 0};
-            pthread_t cleanup_tid;
-            pthread_create(&cleanup_tid, NULL, dvr_shutdown_worker, ctx);
-            pthread_detach(cleanup_tid);
-        }
+		// Tear down raw DVR if no longer needed
+		if (old_has_raw && !new_has_raw)
+		{
+			Dvr *d = dvr_raw;
+			pthread_t td = g_tid_dvr_raw;
+			dvr_raw = nullptr;
+			g_tid_dvr_raw = 0;
+			if (d)
+				d->shutdown();
+			auto *ctx = new DvrShutdownCtx{d, nullptr, nullptr, td, 0, 0};
+			pthread_t cleanup_tid;
+			pthread_create(&cleanup_tid, NULL, dvr_shutdown_worker, ctx);
+			pthread_detach(cleanup_tid);
+		}
 
-        // Create raw DVR if newly needed
-        if (new_has_raw && !dvr_raw && dvr_template) {
-            dvr_thread_params args;
-            bool both = (new_mode == DVR_MODE_BOTH);
-            char *tpl = both ? dvr_template_with_suffix(dvr_template, "_raw") : dvr_template;
-            args.filename_template = tpl;
-            args.mp4_fragmentation_mode = mp4_fragmentation_mode;
-            args.dvr_filenames_with_sequence = dvr_filenames_with_sequence;
-            args.video_framerate = video_framerate;
-            args.max_file_size = dvr_max_file_size;
-            args.video_p.video_frm_width = output_list ? output_list->video_frm_width : 0;
-            args.video_p.video_frm_height = output_list ? output_list->video_frm_height : 0;
-            args.video_p.codec = codec;
-            dvr_raw = new Dvr(args);
-            pthread_create(&g_tid_dvr_raw, NULL, &Dvr::__THREAD__, dvr_raw);
-        }
+		// Create raw DVR if newly needed
+		if (new_has_raw && !dvr_raw && dvr_template)
+		{
+			dvr_thread_params args;
+			bool both = (new_mode == DVR_MODE_BOTH);
+			char *tpl = both ? dvr_template_with_suffix(dvr_template, "_raw") : dvr_template;
+			args.filename_template = tpl;
+			args.mp4_fragmentation_mode = mp4_fragmentation_mode;
+			args.dvr_filenames_with_sequence = dvr_filenames_with_sequence;
+			args.video_framerate = video_framerate;
+			args.max_file_size = dvr_max_file_size;
+			args.video_p.video_frm_width = output_list ? output_list->video_frm_width : 0;
+			args.video_p.video_frm_height = output_list ? output_list->video_frm_height : 0;
+			args.video_p.codec = codec;
+			dvr_raw = new Dvr(args);
+			pthread_create(&g_tid_dvr_raw, NULL, &Dvr::__THREAD__, dvr_raw);
+		}
 
-        // Create encoder pipeline + reenc DVR if newly needed
-        if (new_has_reenc && !reencoder && dvr_template) {
-            bool both = (new_mode == DVR_MODE_BOTH);
-            char *tpl = both ? dvr_template_with_suffix(dvr_template, "_reenc") : dvr_template;
-            dvr_thread_params args;
-            args.filename_template = tpl;
-            args.mp4_fragmentation_mode = mp4_fragmentation_mode;
-            args.dvr_filenames_with_sequence = dvr_filenames_with_sequence;
-            args.video_framerate = reenc_params.fps;
-            args.max_file_size = dvr_max_file_size;
-            uint32_t rw, rh; reenc_target_dims(rw, rh);
-            args.video_p.video_frm_width = rw;
-            args.video_p.video_frm_height = rh;
-            args.video_p.codec = reenc_params.codec;
-            dvr_reenc_inst = new Dvr(args);
-            pthread_create(&g_tid_dvr_reenc, NULL, &Dvr::__THREAD__, dvr_reenc_inst);
+		// Create encoder pipeline + reenc DVR if newly needed
+		if (new_has_reenc && !reencoder && dvr_template)
+		{
+			bool both = (new_mode == DVR_MODE_BOTH);
+			char *tpl = both ? dvr_template_with_suffix(dvr_template, "_reenc") : dvr_template;
+			dvr_thread_params args;
+			args.filename_template = tpl;
+			args.mp4_fragmentation_mode = mp4_fragmentation_mode;
+			args.dvr_filenames_with_sequence = dvr_filenames_with_sequence;
+			args.video_framerate = reenc_params.fps;
+			args.max_file_size = dvr_max_file_size;
+			uint32_t rw, rh;
+			reenc_target_dims(rw, rh);
+			args.video_p.video_frm_width = rw;
+			args.video_p.video_frm_height = rh;
+			args.video_p.codec = reenc_params.codec;
+			dvr_reenc_inst = new Dvr(args);
+			pthread_create(&g_tid_dvr_reenc, NULL, &Dvr::__THREAD__, dvr_reenc_inst);
 
-            reencoder = new MppEncoder(reenc_params,
-                             [](std::shared_ptr<std::vector<uint8_t>> nal) {
-                                 if (dvr_enabled && dvr_reenc_inst) dvr_reenc_inst->frame(nal);
-                             });
-            pthread_create(&g_tid_enc, NULL, &MppEncoder::__THREAD__, reencoder);
-            frame_proc = new FrameProcessor(reencoder, reenc_params.fps, reenc_params.resolution, drm_fd);
-            if (enable_live_colortrans)
-                frame_proc->set_color_correction(live_colortrans_gain,
-                                                live_colortrans_offset, drm_fd);
-            pthread_create(&g_tid_fproc, NULL, &FrameProcessor::__THREAD__, frame_proc);
-            dvr_reenc_inst->on_start_cb = []() { if (reencoder) reencoder->request_idr(); };
-        }
+			reencoder = new MppEncoder(reenc_params,
+									   [](std::shared_ptr<std::vector<uint8_t>> nal)
+									   {
+										   if (dvr_enabled && dvr_reenc_inst)
+											   dvr_reenc_inst->frame(nal);
+									   });
+			pthread_create(&g_tid_enc, NULL, &MppEncoder::__THREAD__, reencoder);
+			frame_proc = new FrameProcessor(reencoder, reenc_params.fps, reenc_params.resolution, drm_fd);
+			if (enable_live_colortrans)
+				frame_proc->set_color_correction(live_colortrans_gain,
+												 live_colortrans_offset, drm_fd);
+			pthread_create(&g_tid_fproc, NULL, &FrameProcessor::__THREAD__, frame_proc);
+			dvr_reenc_inst->on_start_cb = []()
+			{ if (reencoder) reencoder->request_idr(); };
+		}
 
-        dvr_mode = new_mode;
-        spdlog::info("DVR mode set to {}", mode == 0 ? "raw" : mode == 1 ? "reencode" : "both");
-    }
+		dvr_mode = new_mode;
+		spdlog::info("DVR mode set to {}", mode == 0 ? "raw" : mode == 1 ? "reencode"
+																		 : "both");
+	}
 
-    // Deprecated wrapper for backward compatibility
-    void dvr_reenc_set_mode(int enabled) {
-        dvr_set_mode(enabled ? DVR_MODE_REENCODE : DVR_MODE_RAW);
-    }
+	// Deprecated wrapper for backward compatibility
+	void dvr_reenc_set_mode(int enabled)
+	{
+		dvr_set_mode(enabled ? DVR_MODE_REENCODE : DVR_MODE_RAW);
+	}
 }
 
-int decoder_stalled_count=0;
-bool feed_packet_to_decoder(MppPacket *packet,void* data_p,int data_len){
-    mpp_packet_set_data(packet, data_p);
-    mpp_packet_set_size(packet, data_len);
-    mpp_packet_set_pos(packet, data_p);
-    mpp_packet_set_length(packet, data_len);
-    mpp_packet_set_pts(packet,(RK_S64) get_time_ms());
-    // Feed the data to mpp until either timeout (in which case the decoder might have stalled)
-    // or success
-    uint64_t data_feed_begin = get_time_ms();
-    int ret=0;
-    while (!signal_flag && MPP_OK != (ret = mpi.mpi->decode_put_packet(mpi.ctx, packet))) {
-        uint64_t elapsed = get_time_ms() - data_feed_begin;
-        osd_publish_uint_fact("video.decoder_feed_time_ms", NULL, 0, elapsed);
-        if (elapsed > 100) {
-            decoder_stalled_count++;
-            spdlog::warn("Cannot feed decoder, stalled {} ?", decoder_stalled_count);
-            return false;
-        }
-        usleep(2 * 1000);
-    }
-    return true;
+int decoder_stalled_count = 0;
+bool feed_packet_to_decoder(MppPacket *packet, void *data_p, int data_len)
+{
+	mpp_packet_set_data(packet, data_p);
+	mpp_packet_set_size(packet, data_len);
+	mpp_packet_set_pos(packet, data_p);
+	mpp_packet_set_length(packet, data_len);
+	mpp_packet_set_pts(packet, (RK_S64)get_time_ms());
+	// Feed the data to mpp until either timeout (in which case the decoder might have stalled)
+	// or success
+	uint64_t data_feed_begin = get_time_ms();
+	int ret = 0;
+	while (!signal_flag && MPP_OK != (ret = mpi.mpi->decode_put_packet(mpi.ctx, packet)))
+	{
+		uint64_t elapsed = get_time_ms() - data_feed_begin;
+		osd_publish_uint_fact("video.decoder_feed_time_ms", NULL, 0, elapsed);
+		if (elapsed > 100)
+		{
+			decoder_stalled_count++;
+			spdlog::warn("Cannot feed decoder, stalled {} ?", decoder_stalled_count);
+			return false;
+		}
+		usleep(2 * 1000);
+	}
+	return true;
 }
 
 std::unique_ptr<GstRtpReceiver> receiver;
 static MppCodingType current_mpp_type = MPP_VIDEO_CodingHEVC;
-static MppCodingType stream_mpp_type  = MPP_VIDEO_CodingHEVC;
+static MppCodingType stream_mpp_type = MPP_VIDEO_CodingHEVC;
 
-static void reinit_mpp_decoder(MppCodingType new_type) {
-    if (new_type == current_mpp_type) return;
-    spdlog::info("Reinitializing MPP decoder: {} -> {}",
-                 current_mpp_type == MPP_VIDEO_CodingHEVC ? "H.265" : "H.264",
-                 new_type == MPP_VIDEO_CodingHEVC ? "H.265" : "H.264");
-    // Signal frame thread to release the lock, then acquire it
-    mpp_reinit_pending.store(true, std::memory_order_release);
-    mpi.mpi->reset(mpi.ctx);
-    pthread_mutex_lock(&mpp_reinit_mutex);
+static void reinit_mpp_decoder(MppCodingType new_type)
+{
+	if (new_type == current_mpp_type)
+		return;
+	spdlog::info("Reinitializing MPP decoder: {} -> {}",
+				 current_mpp_type == MPP_VIDEO_CodingHEVC ? "H.265" : "H.264",
+				 new_type == MPP_VIDEO_CodingHEVC ? "H.265" : "H.264");
+	// Signal frame thread to release the lock, then acquire it
+	mpp_reinit_pending.store(true, std::memory_order_release);
+	mpi.mpi->reset(mpi.ctx);
+	pthread_mutex_lock(&mpp_reinit_mutex);
 
-    mpp_destroy(mpi.ctx);
-    mpi.ctx = nullptr;
-    mpi.mpi = nullptr;
-    int ret = mpp_create(&mpi.ctx, &mpi.mpi);
-    assert(!ret);
-    set_mpp_decoding_parameters(mpi.mpi, mpi.ctx);
-    ret = mpp_init(mpi.ctx, MPP_CTX_DEC, new_type);
-    assert(!ret);
-    set_mpp_decoding_parameters(mpi.mpi, mpi.ctx);
-    int param = MPP_POLL_BLOCK;
-    ret = mpi.mpi->control(mpi.ctx, MPP_SET_OUTPUT_BLOCK, &param);
-    assert(!ret);
-    current_mpp_type = new_type;
+	mpp_destroy(mpi.ctx);
+	mpi.ctx = nullptr;
+	mpi.mpi = nullptr;
+	int ret = mpp_create(&mpi.ctx, &mpi.mpi);
+	assert(!ret);
+	set_mpp_decoding_parameters(mpi.mpi, mpi.ctx);
+	ret = mpp_init(mpi.ctx, MPP_CTX_DEC, new_type);
+	assert(!ret);
+	set_mpp_decoding_parameters(mpi.mpi, mpi.ctx);
+	int param = MPP_POLL_BLOCK;
+	ret = mpi.mpi->control(mpi.ctx, MPP_SET_OUTPUT_BLOCK, &param);
+	assert(!ret);
+	current_mpp_type = new_type;
 
-    mpp_reinit_pending.store(false, std::memory_order_release);
-    pthread_mutex_unlock(&mpp_reinit_mutex);
+	mpp_reinit_pending.store(false, std::memory_order_release);
+	pthread_mutex_unlock(&mpp_reinit_mutex);
 }
 
-void switch_pipeline_source(const char * source_type, const char * source_path) {
-    if (strcmp(source_type, "file") == 0) {
-        VideoCodec file_codec = receiver->switch_to_file_playback(source_path);
-        MppCodingType new_type = (file_codec == VideoCodec::H265)
-            ? MPP_VIDEO_CodingHEVC : MPP_VIDEO_CodingAVC;
-        reinit_mpp_decoder(new_type);
-    } else if (strcmp(source_type, "stream") == 0) {
-        receiver->switch_to_stream();
-        reinit_mpp_decoder(stream_mpp_type);
-    } else {
-        spdlog::error("Unknown source type: {}", source_type);
-    }
+void switch_pipeline_source(const char *source_type, const char *source_path)
+{
+	if (strcmp(source_type, "file") == 0)
+	{
+		VideoCodec file_codec = receiver->switch_to_file_playback(source_path);
+		MppCodingType new_type = (file_codec == VideoCodec::H265)
+									 ? MPP_VIDEO_CodingHEVC
+									 : MPP_VIDEO_CodingAVC;
+		reinit_mpp_decoder(new_type);
+	}
+	else if (strcmp(source_type, "stream") == 0)
+	{
+		receiver->switch_to_stream();
+		reinit_mpp_decoder(stream_mpp_type);
+	}
+	else
+	{
+		spdlog::error("Unknown source type: {}", source_type);
+	}
 }
 
-void fast_forward(double rate){ 
-        receiver->fast_forward();
+void fast_forward(double rate)
+{
+	receiver->fast_forward();
 }
 
-void fast_rewind(double rate){ 
-        receiver->fast_rewind();
+void fast_rewind(double rate)
+{
+	receiver->fast_rewind();
 }
 
-void skip_duration(int64_t skip_ms){
-        receiver->skip_duration(skip_ms);
+void skip_duration(int64_t skip_ms)
+{
+	receiver->skip_duration(skip_ms);
 }
 
-void normal_playback() { 
-        receiver->normal_playback();
+void normal_playback()
+{
+	receiver->normal_playback();
 }
 
-void pause_playback() {
-        receiver->pause();
+void pause_playback()
+{
+	receiver->pause();
 }
 
-void resume_playback() {
-        receiver->resume();
+void resume_playback()
+{
+	receiver->resume();
 }
 
-class CustomMsgManager {
+class CustomMsgManager
+{
 public:
-    CustomMsgManager(const char* fifoName, bool enabled) : fifoName(fifoName), fd(-1), enabled(enabled) {}
+	CustomMsgManager(const char *fifoName, bool enabled) : fifoName(fifoName), fd(-1), enabled(enabled) {}
 
-    int open_fifo() {
-        if (!enabled) {
-            return 0;
-        }
-        // Kill FIFO if already exists
-        if (access(fifoName, F_OK) == 0) {
-            unlink(fifoName);
-        }
+	int open_fifo()
+	{
+		if (!enabled)
+		{
+			return 0;
+		}
+		// Kill FIFO if already exists
+		if (access(fifoName, F_OK) == 0)
+		{
+			unlink(fifoName);
+		}
 
-        if (mkfifo(fifoName, 0622) == -1) {
-            spdlog::error("Failed to create FIFO {}: {}", fifoName,  strerror(errno));
-            return -1;
-        }
+		if (mkfifo(fifoName, 0622) == -1)
+		{
+			spdlog::error("Failed to create FIFO {}: {}", fifoName, strerror(errno));
+			return -1;
+		}
 
-        // Change permissions to allow write for everyone
-        if (chmod(fifoName, 0622) == -1) {
-            spdlog::error("Failed to change permissions {}: {}", fifoName, strerror(errno));
-            return -2;
-        }
+		// Change permissions to allow write for everyone
+		if (chmod(fifoName, 0622) == -1)
+		{
+			spdlog::error("Failed to change permissions {}: {}", fifoName, strerror(errno));
+			return -2;
+		}
 
-        // Open the FIFO for reading
-        fd = open(fifoName, O_RDONLY | O_NONBLOCK);
-        if (fd == -1) {
-            spdlog::error("Failed to open FIFO {}: {}", fifoName, strerror(errno));
-            return -3;
-        }
+		// Open the FIFO for reading
+		fd = open(fifoName, O_RDONLY | O_NONBLOCK);
+		if (fd == -1)
+		{
+			spdlog::error("Failed to open FIFO {}: {}", fifoName, strerror(errno));
+			return -3;
+		}
 
-        return 0;
-    }
+		return 0;
+	}
 
-    void check_message() {
-        if (!enabled) {
-            return;
-        } else if (fd == -1) {
-            spdlog::error("FIFO is not initialized.");
-            return; // Avoid reading if FIFO is not initialized
-        }
+	void check_message()
+	{
+		if (!enabled)
+		{
+			return;
+		}
+		else if (fd == -1)
+		{
+			spdlog::error("FIFO is not initialized.");
+			return; // Avoid reading if FIFO is not initialized
+		}
 
-        // fd is non-blocking
-        char chunk[120];
-        ssize_t bytes_read = read(fd, chunk, sizeof(chunk));
-        if (bytes_read > 0) {
-            buffer.append(chunk, bytes_read);
-        }
+		// fd is non-blocking
+		char chunk[120];
+		ssize_t bytes_read = read(fd, chunk, sizeof(chunk));
+		if (bytes_read > 0)
+		{
+			buffer.append(chunk, bytes_read);
+		}
 
-        // Emit one fact per `\n`-terminated message. If the buffer grows past
-        // MAX_MSG_LEN without a newline, flush it anyway so a stuck writer
-        // cannot make us grow unboundedly.
-        while (true) {
-            size_t nl = buffer.find('\n');
-            if (nl == std::string::npos) {
-                if (buffer.size() >= MAX_MSG_LEN) {
-                    publish_message(buffer);
-                    buffer.clear();
-                }
-                break;
-            }
-            std::string msg = buffer.substr(0, nl);
-            buffer.erase(0, nl + 1);
-            if (!msg.empty()) {
-                publish_message(msg);
-            }
-        }
-    }
+		// Emit one fact per `\n`-terminated message. If the buffer grows past
+		// MAX_MSG_LEN without a newline, flush it anyway so a stuck writer
+		// cannot make us grow unboundedly.
+		while (true)
+		{
+			size_t nl = buffer.find('\n');
+			if (nl == std::string::npos)
+			{
+				if (buffer.size() >= MAX_MSG_LEN)
+				{
+					publish_message(buffer);
+					buffer.clear();
+				}
+				break;
+			}
+			std::string msg = buffer.substr(0, nl);
+			buffer.erase(0, nl + 1);
+			if (!msg.empty())
+			{
+				publish_message(msg);
+			}
+		}
+	}
 
-    // Unescape `\\n` -> literal newline so writers that cannot emit a raw
-    // newline (eg shell `echo` without `-e`) can still build multi-line
-    // messages.
-    static std::string unescape_newlines(const std::string& in) {
-        std::string out;
-        out.reserve(in.size());
-        for (size_t i = 0; i < in.size(); ++i) {
-            if (in[i] == '\\' && i + 1 < in.size() && in[i + 1] == 'n') {
-                out.push_back('\n');
-                ++i;
-            } else {
-                out.push_back(in[i]);
-            }
-        }
-        return out;
-    }
+	// Unescape `\\n` -> literal newline so writers that cannot emit a raw
+	// newline (eg shell `echo` without `-e`) can still build multi-line
+	// messages.
+	static std::string unescape_newlines(const std::string &in)
+	{
+		std::string out;
+		out.reserve(in.size());
+		for (size_t i = 0; i < in.size(); ++i)
+		{
+			if (in[i] == '\\' && i + 1 < in.size() && in[i + 1] == 'n')
+			{
+				out.push_back('\n');
+				++i;
+			}
+			else
+			{
+				out.push_back(in[i]);
+			}
+		}
+		return out;
+	}
 
-    void publish_message(const std::string& raw) {
-        osd_tag tags[1];
-        strcpy(tags[0].key, "file");
-        strcpy(tags[0].val, fifoName);
-        std::string msg = unescape_newlines(raw);
-        osd_publish_str_fact("osd.custom_message", tags, 1, msg.c_str());
-    }
+	void publish_message(const std::string &raw)
+	{
+		osd_tag tags[1];
+		strcpy(tags[0].key, "file");
+		strcpy(tags[0].val, fifoName);
+		std::string msg = unescape_newlines(raw);
+		osd_publish_str_fact("osd.custom_message", tags, 1, msg.c_str());
+	}
 
-    ~CustomMsgManager() {
-        if (fd != -1) {
-            close(fd);
-        }
-        unlink(fifoName);
-    }
+	~CustomMsgManager()
+	{
+		if (fd != -1)
+		{
+			close(fd);
+		}
+		unlink(fifoName);
+	}
 
 private:
-    static constexpr size_t MAX_MSG_LEN = 512;
+	static constexpr size_t MAX_MSG_LEN = 512;
 
-    const char* fifoName;
-    int fd; // File descriptor for the FIFO
-    bool enabled;
-    std::string buffer; // accumulates partial reads until a `\n` is seen
+	const char *fifoName;
+	int fd; // File descriptor for the FIFO
+	bool enabled;
+	std::string buffer; // accumulates partial reads until a `\n` is seen
 };
 
-void main_loop() {
-    CustomMsgManager msg_manager(MSG_FIFO_NAME, osd_custom_message);
+void main_loop()
+{
+	CustomMsgManager msg_manager(MSG_FIFO_NAME, osd_custom_message);
 
-    if (msg_manager.open_fifo() != 0) {
-        return;
-    }
+	if (msg_manager.open_fifo() != 0)
+	{
+		return;
+	}
 
-    while (!signal_flag) {
-        // TODO: put gsmenu main loop here
-        msg_manager.check_message();
+	while (!signal_flag)
+	{
+		// TODO: put gsmenu main loop here
+		msg_manager.check_message();
 		os_sensors.run();
-		if (RXMODE == APFPV) {
-    		wifi_monitor.run();
+		if (RXMODE == APFPV)
+		{
+			wifi_monitor.run();
 		}
-        sleep(1);
-    }
-    return;
+		sleep(1);
+	}
+	return;
 }
 
-uint64_t first_frame_ms=0;
+uint64_t first_frame_ms = 0;
 // Publish the active video codec as OSD facts: a human-readable string
 // ("video.codec" = "h264"/"h265") for text widgets, and a numeric id
 // ("video.codec_id" = 0/1) for IconSelectorWidget, which selects by number.
-static void publish_codec_fact(VideoCodec c) {
+static void publish_codec_fact(VideoCodec c)
+{
 	osd_publish_str_fact("video.codec", NULL, 0,
-	                     (c == VideoCodec::H265) ? "h265" : "h264");
+						 (c == VideoCodec::H265) ? "h265" : "h264");
 	osd_publish_uint_fact("video.codec_id", NULL, 0,
-	                      (c == VideoCodec::H265) ? 1u : 0u);
+						  (c == VideoCodec::H265) ? 1u : 0u);
 }
 
-void read_gstreamerpipe_stream(MppPacket *packet, int gst_udp_port, const char *sock ,const VideoCodec& codec){
-	if (sock) {
+void read_gstreamerpipe_stream(MppPacket *packet, int gst_udp_port, const char *sock, const VideoCodec &codec)
+{
+	if (sock)
+	{
 		receiver = std::make_unique<GstRtpReceiver>(sock, codec);
-	} else {
+	}
+	else
+	{
 		receiver = std::make_unique<GstRtpReceiver>(gst_udp_port, codec);
 	}
 	// Realign the MPP decoder whenever the receiver detects a mid-stream codec
-	// switch and rebuilds its pipeline.
-	receiver->set_codec_changed_callback([](VideoCodec c) {
+	// switch and rebuilds its pipeline. In headless mode there is no decoder to
+	// realign, so the callback is left unset.
+	if (!headless)
+	{
+		receiver->set_codec_changed_callback([](VideoCodec c)
+											 {
 		MppCodingType t = (c == VideoCodec::H265) ? MPP_VIDEO_CodingHEVC : MPP_VIDEO_CodingAVC;
 		stream_mpp_type = t;
 		// Keep the global codec in sync so the decoder info-change handler
 		// (init_buffer) hands the raw DVR the right codec and rolls its file.
 		::codec = c;
 		reinit_mpp_decoder(t);
-		publish_codec_fact(c);
-	});
-	long long bytes_received = 0; 
-	uint64_t period_start=0;
-    auto cb=[&packet,/*&decoder_stalled_count,*/ &bytes_received, &period_start](std::shared_ptr<std::vector<uint8_t>> frame){
-        // Let the gst pull thread run at quite high priority
-        static bool first= true;
-        static int stall_count = 0;
-        static uint64_t last_stall_idr_ms = 0;
-        if(first){
-            SchedulingHelper::set_thread_params_max_realtime("GstPullThread",SchedulingHelper::PRIORITY_REALTIME_LOW);
-            first= false;
-        }
+		publish_codec_fact(c); });
+	}
+	long long bytes_received = 0;
+	uint64_t period_start = 0;
+	auto cb = [&packet, /*&decoder_stalled_count,*/ &bytes_received, &period_start](std::shared_ptr<std::vector<uint8_t>> frame)
+	{
+		// Let the gst pull thread run at quite high priority
+		static bool first = true;
+		static int stall_count = 0;
+		static uint64_t last_stall_idr_ms = 0;
+		if (first)
+		{
+			SchedulingHelper::set_thread_params_max_realtime("GstPullThread", SchedulingHelper::PRIORITY_REALTIME_LOW);
+			first = false;
+		}
 		bytes_received += frame->size();
 		uint64_t now = get_time_ms();
 		osd_publish_uint_fact("gstreamer.received_bytes", NULL, 0, frame->size());
-        const bool fed_ok = feed_packet_to_decoder(packet,frame->data(),frame->size());
-        if (!fed_ok) {
-            stall_count++;
-            if (stall_count >= 3 && (now - last_stall_idr_ms) > 500) {
-                last_stall_idr_ms = now;
-                stall_count = 0;
-                idr_request_decoder_issue("decoder-feed-stall");
-            }
-        } else {
-            stall_count = 0;
-        }
-        if (dvr_enabled && dvr_raw != NULL) {
+		// In headless mode there is no MPP decoder; the restream branch inside the
+		// GStreamer pipeline still forwards the RTP stream to the phone.
+		const bool fed_ok = headless ? true : feed_packet_to_decoder(packet, frame->data(), frame->size());
+		if (!fed_ok)
+		{
+			stall_count++;
+			if (stall_count >= 3 && (now - last_stall_idr_ms) > 500)
+			{
+				last_stall_idr_ms = now;
+				stall_count = 0;
+				idr_request_decoder_issue("decoder-feed-stall");
+			}
+		}
+		else
+		{
+			stall_count = 0;
+		}
+		if (dvr_enabled && dvr_raw != NULL)
+		{
 			dvr_raw->frame(frame);
-        }
-    };
-    receiver->start_receiving(cb);
-    // In auto mode the global codec stays UNKNOWN through receiver construction
-    // (that sentinel is how the receiver knows to auto-detect). Now that the
-    // pipeline has resolved a codec, reflect it globally so DVR setup
-    // (init_buffer) and the OSD use it. The MPP decoder was already initialized
-    // for this codec in main(); a genuine mid-stream change is handled by the
-    // codec-changed callback above.
-    ::codec = receiver->get_active_codec();
-    publish_codec_fact(::codec);
-    main_loop();
-    receiver->stop_receiving();
-    spdlog::info("Feeding eos");
-    mpp_packet_set_eos(packet);
-    //mpp_packet_set_pos(packet, nal_buffer);
-    mpp_packet_set_length(packet, 0);
-    int ret=0;
-    while (MPP_OK != (ret = mpi.mpi->decode_put_packet(mpi.ctx, packet))) {
-        usleep(10000);
-    }
+		}
+	};
+	receiver->start_receiving(cb);
+	// In auto mode the global codec stays UNKNOWN through receiver construction
+	// (that sentinel is how the receiver knows to auto-detect). Now that the
+	// pipeline has resolved a codec, reflect it globally so DVR setup
+	// (init_buffer) and the OSD use it. The MPP decoder was already initialized
+	// for this codec in main(); a genuine mid-stream change is handled by the
+	// codec-changed callback above.
+	::codec = receiver->get_active_codec();
+	publish_codec_fact(::codec);
+	main_loop();
+	receiver->stop_receiving();
+	if (!headless)
+	{
+		spdlog::info("Feeding eos");
+		mpp_packet_set_eos(packet);
+		// mpp_packet_set_pos(packet, nal_buffer);
+		mpp_packet_set_length(packet, 0);
+		int ret = 0;
+		while (MPP_OK != (ret = mpi.mpi->decode_put_packet(mpi.ctx, packet)))
+		{
+			usleep(10000);
+		}
+	}
 };
 
-
-void set_control_verbose(MppApi * mpi,  MppCtx ctx,MpiCmd control,RK_U32 enable){
-    RK_U32 res = mpi->control(ctx, control, &enable);
-    if(res){
-        spdlog::warn("Could not set control {} {}", static_cast<int>(control), enable);
-        assert(false);
-    }
+void set_control_verbose(MppApi *mpi, MppCtx ctx, MpiCmd control, RK_U32 enable)
+{
+	RK_U32 res = mpi->control(ctx, control, &enable);
+	if (res)
+	{
+		spdlog::warn("Could not set control {} {}", static_cast<int>(control), enable);
+		assert(false);
+	}
 }
 
-void set_mpp_decoding_parameters(MppApi * mpi,  MppCtx ctx) {
-    // config for runtime mode
-    MppDecCfg cfg       = NULL;
-    mpp_dec_cfg_init(&cfg);
-    // get default config from decoder context
-    int ret = mpi->control(ctx, MPP_DEC_GET_CFG, cfg);
-    if (ret) {
-        spdlog::warn("{} failed to get decoder cfg ret {}", ctx, ret);
-        assert(false);
-    }
-    // split_parse is to enable mpp internal frame spliter when the input
-    // packet is not aplited into frames.
-    RK_U32 need_split   = 1;
-    ret = mpp_dec_cfg_set_u32(cfg, "base:split_parse", need_split);
-    if (ret) {
-        spdlog::warn("{} failed to set split_parse ret {}", ctx, ret);
-        assert(false);
-    }
-    ret = mpi->control(ctx, MPP_DEC_SET_CFG, cfg);
-    if (ret) {
-        spdlog::warn("{} failed to set cfg {} ret {}", ctx, cfg, ret);
-        assert(false);
-    }
-	int mpp_split_mode =0;
-    set_control_verbose(mpi,ctx,MPP_DEC_SET_PARSER_SPLIT_MODE, mpp_split_mode ? 0xffff : 0);
-    set_control_verbose(mpi,ctx,MPP_DEC_SET_DISABLE_ERROR, 0xffff);
-    set_control_verbose(mpi,ctx,MPP_DEC_SET_IMMEDIATE_OUT, 0xffff);
-    set_control_verbose(mpi,ctx,MPP_DEC_SET_ENABLE_FAST_PLAY, 0xffff);
-    //set_control_verbose(mpi,ctx,MPP_DEC_SET_ENABLE_DEINTERLACE, 0xffff);
-    // Docu fast mode:
-    // and improve the
-    // parallelism of decoder hardware and software
-    // we probably don't want that, since we don't need pipelining to hit our bitrate(s)
-    int fast_mode = 0;
-    set_control_verbose(mpi,ctx,MPP_DEC_SET_PARSER_FAST_MODE,fast_mode);
+void set_mpp_decoding_parameters(MppApi *mpi, MppCtx ctx)
+{
+	// config for runtime mode
+	MppDecCfg cfg = NULL;
+	mpp_dec_cfg_init(&cfg);
+	// get default config from decoder context
+	int ret = mpi->control(ctx, MPP_DEC_GET_CFG, cfg);
+	if (ret)
+	{
+		spdlog::warn("{} failed to get decoder cfg ret {}", ctx, ret);
+		assert(false);
+	}
+	// split_parse is to enable mpp internal frame spliter when the input
+	// packet is not aplited into frames.
+	RK_U32 need_split = 1;
+	ret = mpp_dec_cfg_set_u32(cfg, "base:split_parse", need_split);
+	if (ret)
+	{
+		spdlog::warn("{} failed to set split_parse ret {}", ctx, ret);
+		assert(false);
+	}
+	ret = mpi->control(ctx, MPP_DEC_SET_CFG, cfg);
+	if (ret)
+	{
+		spdlog::warn("{} failed to set cfg {} ret {}", ctx, cfg, ret);
+		assert(false);
+	}
+	int mpp_split_mode = 0;
+	set_control_verbose(mpi, ctx, MPP_DEC_SET_PARSER_SPLIT_MODE, mpp_split_mode ? 0xffff : 0);
+	set_control_verbose(mpi, ctx, MPP_DEC_SET_DISABLE_ERROR, 0xffff);
+	set_control_verbose(mpi, ctx, MPP_DEC_SET_IMMEDIATE_OUT, 0xffff);
+	set_control_verbose(mpi, ctx, MPP_DEC_SET_ENABLE_FAST_PLAY, 0xffff);
+	// set_control_verbose(mpi,ctx,MPP_DEC_SET_ENABLE_DEINTERLACE, 0xffff);
+	//  Docu fast mode:
+	//  and improve the
+	//  parallelism of decoder hardware and software
+	//  we probably don't want that, since we don't need pipelining to hit our bitrate(s)
+	int fast_mode = 0;
+	set_control_verbose(mpi, ctx, MPP_DEC_SET_PARSER_FAST_MODE, fast_mode);
 }
 
-void printHelp() {
-  printf(
-    "\n\t\tPixelPilot FPV Decoder for Rockchip (%d.%d)\n"
-    "\n"
-    "  Usage:\n"
-    "    pixelpilot [Arguments]\n"
-    "\n"
-    "  Arguments:\n"
-    "    --config <configfile>  - Load pixelpilot config from file      (Default: /etc/pixelpilot.yaml)\n"
-    "\n"
-    "    -p <port>              - UDP port for RTP video stream         (Default: 5600)\n"
-    "\n"
-    "    --socket <socket>      - read data from socket\n"
-    "\n"
-    "    --mavlink-port <port>  - UDP port for mavlink telemetry        (Default: 14550)\n"
-    "\n"
-    "    --mavlink-dvr-on-arm   - Start recording when armed\n"
-    "\n"
-    "    --codec <codec>        - Video codec, should be the same as on VTX  (Default: h265 <h264|h265|auto>)\n"
-    "\n"
-    "    --log-level <level>    - Log verbosity level, debug|info|warn|error (Default: info)\n"
-    "\n"
-    "    --osd                  - Enable OSD\n"
-    "\n"
-    "    --osd-config <file>    - Path to OSD configuration file\n"
-    "\n"
-    "    --osd-refresh <rate>   - Defines the delay between osd refresh (Default: 1000 ms)\n"
-    "\n"
-    "    --osd-custom-message   - Enables the display of /run/pixelpilot.msg (beta feature, may be removed)\n"
-    "\n"
-    "    --dvr-template <path>  - Save the video feed (no osd) to the provided filename template.\n"
-    "                             DVR is toggled by SIGUSR1 signal\n"
-    "                             Supports placeholders %%Y - year, %%m - month, %%d - day,\n"
-    "                             %%H - hour, %%M - minute, %%S - second. Ex: /media/DVR/%%Y-%%m-%%d_%%H-%%M-%%S.mp4\n"
-    "\n"
-    "    --dvr-sequenced-files  - Prepend a sequence number to the names of the dvr files\n"
-    "\n"
-    "    --dvr-start            - Start DVR immediately\n"
-    "\n"
-    "    --dvr-framerate <rate> - Force the dvr framerate for smoother dvr, ex: 60\n"
-    "\n"
-    "    --dvr-max-size <MB>    - Split DVR files at <MB> megabytes (Default: 4000, for VFAT)\n"
-    "\n"
-    "    --dvr-fmp4             - Save the video feed as a fragmented mp4\n"
-    "\n"
-    "    --dvr-mode <mode>      - DVR recording mode: raw, reencode, or both (Default: raw)\n"
-    "\n"
-    "    --dvr-reenc-codec <c>  - Re-encode codec: h264 or h265  (Default: h264)\n"
-    "\n"
-    "    --dvr-reenc-bitrate <k>- Re-encode bitrate in kbps       (Default: 8000)\n"
-    "\n"
-    "    --dvr-reenc-fps <fps>  - Re-encode output FPS            (Default: 30)\n"
-    "\n"
-    "    --dvr-reenc-resolution <r> - Re-encode resolution: 720p or 1080p (Default: 1080p)\n"
-    "\n"
-    "    --dvr-osd              - Blend the OSD into the DVR recording\n"
-    "\n"
-    "    --screen-mode <mode>   - Override default screen mode. <width>x<heigth>@<fps> ex: 1920x1080@120\n"
-    "\n"
-    "    --video-plane-id       - Override default drm plane used for video by plane-id\n"
-	"\n"
-	"    --video-scale <factor> - Scale video output size (0.5 =< factor <= 1.0) (Default: 1.0)\n"
-    "\n"
-    "    --osd-plane-id         - Override default drm plane used for osd by plane-id\n"
-    "\n"
-    "    --disable-vsync        - Disable VSYNC commits\n"
-    "\n"
-    "    --disable-gregidr      - Disable last-hop probing and IDR requests\n"
-    "\n"
-    "    --live-colortrans      - Apply colortrans LUT to live display via DRM gamma\n"	
-    "\n"
-    "    --screen-mode-list     - Print the list of supported screen modes and exit.\n"
-    "\n"
-    "    --wfb-api-port         - Port of wfb-server for cli statistics. (Default: 8003)\n"
-    "                             Use \"0\" to disable this stats\n"
-    "\n"
-    "    --wfb-api-host         - Host or IP of wfb-server for cli statistics. (Default: 127.0.0.1)\n"
-    "\n"
-    "    --version              - Show program version\n"
-    "\n", APP_VERSION_MAJOR, APP_VERSION_MINOR
-  );
+void printHelp()
+{
+	printf(
+		"\n\t\tPixelPilot FPV Decoder for Rockchip (%d.%d)\n"
+		"\n"
+		"  Usage:\n"
+		"    pixelpilot [Arguments]\n"
+		"\n"
+		"  Arguments:\n"
+		"    --config <configfile>  - Load pixelpilot config from file      (Default: /etc/pixelpilot.yaml)\n"
+		"\n"
+		"    -p <port>              - UDP port for RTP video stream         (Default: 5600)\n"
+		"\n"
+		"    --socket <socket>      - read data from socket\n"
+		"\n"
+		"    --mavlink-port <port>  - UDP port for mavlink telemetry        (Default: 14550)\n"
+		"\n"
+		"    --mavlink-dvr-on-arm   - Start recording when armed\n"
+		"\n"
+		"    --codec <codec>        - Video codec, should be the same as on VTX  (Default: h265 <h264|h265|auto>)\n"
+		"\n"
+		"    --log-level <level>    - Log verbosity level, debug|info|warn|error (Default: info)\n"
+		"\n"
+		"    --osd                  - Enable OSD\n"
+		"\n"
+		"    --osd-config <file>    - Path to OSD configuration file\n"
+		"\n"
+		"    --osd-refresh <rate>   - Defines the delay between osd refresh (Default: 1000 ms)\n"
+		"\n"
+		"    --osd-custom-message   - Enables the display of /run/pixelpilot.msg (beta feature, may be removed)\n"
+		"\n"
+		"    --dvr-template <path>  - Save the video feed (no osd) to the provided filename template.\n"
+		"                             DVR is toggled by SIGUSR1 signal\n"
+		"                             Supports placeholders %%Y - year, %%m - month, %%d - day,\n"
+		"                             %%H - hour, %%M - minute, %%S - second. Ex: /media/DVR/%%Y-%%m-%%d_%%H-%%M-%%S.mp4\n"
+		"\n"
+		"    --dvr-sequenced-files  - Prepend a sequence number to the names of the dvr files\n"
+		"\n"
+		"    --dvr-start            - Start DVR immediately\n"
+		"\n"
+		"    --dvr-framerate <rate> - Force the dvr framerate for smoother dvr, ex: 60\n"
+		"\n"
+		"    --dvr-max-size <MB>    - Split DVR files at <MB> megabytes (Default: 4000, for VFAT)\n"
+		"\n"
+		"    --dvr-fmp4             - Save the video feed as a fragmented mp4\n"
+		"\n"
+		"    --dvr-mode <mode>      - DVR recording mode: raw, reencode, or both (Default: raw)\n"
+		"\n"
+		"    --dvr-reenc-codec <c>  - Re-encode codec: h264 or h265  (Default: h264)\n"
+		"\n"
+		"    --dvr-reenc-bitrate <k>- Re-encode bitrate in kbps       (Default: 8000)\n"
+		"\n"
+		"    --dvr-reenc-fps <fps>  - Re-encode output FPS            (Default: 30)\n"
+		"\n"
+		"    --dvr-reenc-resolution <r> - Re-encode resolution: 720p or 1080p (Default: 1080p)\n"
+		"\n"
+		"    --dvr-osd              - Blend the OSD into the DVR recording\n"
+		"\n"
+		"    --screen-mode <mode>   - Override default screen mode. <width>x<heigth>@<fps> ex: 1920x1080@120\n"
+		"\n"
+		"    --video-plane-id       - Override default drm plane used for video by plane-id\n"
+		"\n"
+		"    --video-scale <factor> - Scale video output size (0.5 =< factor <= 1.0) (Default: 1.0)\n"
+		"\n"
+		"    --osd-plane-id         - Override default drm plane used for osd by plane-id\n"
+		"\n"
+		"    --disable-vsync        - Disable VSYNC commits\n"
+		"\n"
+		"    --headless             - Run without an HDMI/DRM display. Local video,\n"
+		"                             OSD and DVR are disabled; the stream is still\n"
+		"                             received and restreamed to a tethered phone.\n"
+		"\n"
+		"    --disable-gregidr      - Disable last-hop probing and IDR requests\n"
+		"\n"
+		"    --live-colortrans      - Apply colortrans LUT to live display via DRM gamma\n"
+		"\n"
+		"    --screen-mode-list     - Print the list of supported screen modes and exit.\n"
+		"\n"
+		"    --wfb-api-port         - Port of wfb-server for cli statistics. (Default: 8003)\n"
+		"                             Use \"0\" to disable this stats\n"
+		"\n"
+		"    --wfb-api-host         - Host or IP of wfb-server for cli statistics. (Default: 127.0.0.1)\n"
+		"\n"
+		"    --version              - Show program version\n"
+		"\n",
+		APP_VERSION_MAJOR, APP_VERSION_MINOR);
 }
 
 // main
@@ -1378,7 +1632,7 @@ void printHelp() {
 
 int main(int argc, char **argv)
 {
-	int ret;	
+	int ret;
 	int i, j;
 	int mavlink_thread = 0;
 	int print_modelist = 0;
@@ -1388,74 +1642,86 @@ int main(int argc, char **argv)
 	uint16_t mode_width = 0;
 	uint16_t mode_height = 0;
 	uint32_t mode_vrefresh = 0;
-	char * config_file_path = NULL;
+	char *config_file_path = NULL;
 	std::string osd_config_path;
 	auto log_level = spdlog::level::info;
-	
-    std::string pidFilePath = "/run/pixelpilot.pid";
-    std::ofstream pidFile(pidFilePath);
-    pidFile << getpid();
-    pidFile.close();
+
+	std::string pidFilePath = "/run/pixelpilot.pid";
+	std::ofstream pidFile(pidFilePath);
+	pidFile << getpid();
+	pidFile.close();
 	float video_scale_factor = 1.0;
 
 	// Load console arguments
-	__BeginParseConsoleArguments__(printHelp) 
+	__BeginParseConsoleArguments__(printHelp)
 
-	__OnArgument("-p") {
+		__OnArgument("-p")
+	{
 		listen_port = atoi(__ArgValue);
 		continue;
 	}
-	
-	__OnArgument("--socket") {
-		unix_socket = const_cast<char*>(__ArgValue);
+
+	__OnArgument("--socket")
+	{
+		unix_socket = const_cast<char *>(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--config") {
+	__OnArgument("--config")
+	{
 		// Already handled above, just skip
-		config_file_path = const_cast<char*>(__ArgValue);
+		config_file_path = const_cast<char *>(__ArgValue);
 		continue;
-	}	
+	}
 
-	__OnArgument("--codec") {
-		char * codec_str = const_cast<char*>(__ArgValue);
-		if (!strcmp(codec_str, "auto")) {
+	__OnArgument("--codec")
+	{
+		char *codec_str = const_cast<char *>(__ArgValue);
+		if (!strcmp(codec_str, "auto"))
+		{
 			// Sentinel: build for H.265 and let the receiver flip codec from the
 			// RTP ingress if the stream turns out to be H.264.
 			codec = VideoCodec::UNKNOWN;
 			continue;
 		}
 		codec = video_codec(codec_str);
-		if (codec == VideoCodec::UNKNOWN ) {
+		if (codec == VideoCodec::UNKNOWN)
+		{
 			fprintf(stderr, "unsupported video codec");
 			return -1;
 		}
 		continue;
 	}
 
-	__OnArgument("--dvr-start") {
+	__OnArgument("--dvr-start")
+	{
 		dvr_autostart = 1;
 		continue;
 	}
 
-	__OnArgument("--dvr-template") {
-		dvr_template = const_cast<char*>(__ArgValue);
+	__OnArgument("--dvr-template")
+	{
+		dvr_template = const_cast<char *>(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--dvr-sequenced-files") {
+	__OnArgument("--dvr-sequenced-files")
+	{
 		dvr_filenames_with_sequence = true;
 		continue;
 	}
 
-	__OnArgument("--dvr-framerate") {
+	__OnArgument("--dvr-framerate")
+	{
 		video_framerate = atoi(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--dvr-max-size") {
+	__OnArgument("--dvr-max-size")
+	{
 		int mb = atoi(__ArgValue);
-		if (mb <= 0) {
+		if (mb <= 0)
+		{
 			fprintf(stderr, "invalid --dvr-max-size value\n");
 			return -1;
 		}
@@ -1463,26 +1729,34 @@ int main(int argc, char **argv)
 		continue;
 	}
 
-	__OnArgument("--dvr-fmp4") {
+	__OnArgument("--dvr-fmp4")
+	{
 		mp4_fragmentation_mode = 1;
 		continue;
 	}
 
-	__OnArgument("--dvr-mode") {
+	__OnArgument("--dvr-mode")
+	{
 		const char *v = __ArgValue;
-		if (!strcmp(v, "raw")) dvr_mode = DVR_MODE_RAW;
-		else if (!strcmp(v, "reencode")) dvr_mode = DVR_MODE_REENCODE;
-		else if (!strcmp(v, "both")) dvr_mode = DVR_MODE_BOTH;
-		else {
+		if (!strcmp(v, "raw"))
+			dvr_mode = DVR_MODE_RAW;
+		else if (!strcmp(v, "reencode"))
+			dvr_mode = DVR_MODE_REENCODE;
+		else if (!strcmp(v, "both"))
+			dvr_mode = DVR_MODE_BOTH;
+		else
+		{
 			fprintf(stderr, "unsupported --dvr-mode (use raw, reencode, or both)\n");
 			return -1;
 		}
 		continue;
 	}
 
-	__OnArgument("--dvr-reenc-codec") {
-		VideoCodec c = video_codec(const_cast<char*>(__ArgValue));
-		if (c == VideoCodec::UNKNOWN) {
+	__OnArgument("--dvr-reenc-codec")
+	{
+		VideoCodec c = video_codec(const_cast<char *>(__ArgValue));
+		if (c == VideoCodec::UNKNOWN)
+		{
 			fprintf(stderr, "unsupported codec for --dvr-reenc-codec (use h264 or h265)\n");
 			return -1;
 		}
@@ -1490,44 +1764,61 @@ int main(int argc, char **argv)
 		continue;
 	}
 
-	__OnArgument("--dvr-reenc-bitrate") {
+	__OnArgument("--dvr-reenc-bitrate")
+	{
 		reenc_params.bitrate_kbps = atoi(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--dvr-reenc-fps") {
+	__OnArgument("--dvr-reenc-fps")
+	{
 		reenc_params.fps = atoi(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--dvr-reenc-resolution") {
+	__OnArgument("--dvr-reenc-resolution")
+	{
 		const char *v = __ArgValue;
-		if (!strcmp(v, "720p")) reenc_params.resolution = EncResolution::Res720p;
-		else if (!strcmp(v, "1080p")) reenc_params.resolution = EncResolution::Res1080p;
-		else {
+		if (!strcmp(v, "720p"))
+			reenc_params.resolution = EncResolution::Res720p;
+		else if (!strcmp(v, "1080p"))
+			reenc_params.resolution = EncResolution::Res1080p;
+		else
+		{
 			fprintf(stderr, "unsupported resolution for --dvr-reenc-resolution (use 720p or 1080p)\n");
 			return -1;
 		}
 		continue;
 	}
 
-	__OnArgument("--dvr-osd") {
+	__OnArgument("--dvr-osd")
+	{
 		dvr_osd = true;
 		continue;
 	}
 
-	__OnArgument("--log-level") {
+	__OnArgument("--log-level")
+	{
 		std::string log_l = std::string(__ArgValue);
-		if (log_l == "info") {
+		if (log_l == "info")
+		{
 			log_level = spdlog::level::info;
-		} else if (log_l == "debug"){
+		}
+		else if (log_l == "debug")
+		{
 			log_level = spdlog::level::debug;
 			spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [thread %t] [%s:%#] [%^%l%$] %v");
-		} else if (log_l == "warn"){
+		}
+		else if (log_l == "warn")
+		{
 			log_level = spdlog::level::warn;
-		} else if (log_l == "error"){
+		}
+		else if (log_l == "error")
+		{
 			log_level = spdlog::level::err;
-		} else {
+		}
+		else
+		{
 			fprintf(stderr, "invalid log level %s\n", log_l.c_str());
 			printHelp();
 			return -1;
@@ -1535,526 +1826,646 @@ int main(int argc, char **argv)
 		continue;
 	}
 
-	__OnArgument("--mavlink-port") {
+	__OnArgument("--mavlink-port")
+	{
 		mavlink_port = atoi(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--mavlink-dvr-on-arm") {
+	__OnArgument("--mavlink-dvr-on-arm")
+	{
 		mavlink_dvr_on_arm = true;
 		continue;
 	}
 
-	__OnArgument("--osd") {
+	__OnArgument("--osd")
+	{
 		enable_osd = 1;
 		mavlink_thread = 1;
 		continue;
 	}
-	__OnArgument("--osd-config") {
+	__OnArgument("--osd-config")
+	{
 		osd_config_path = std::string(__ArgValue);
 		continue;
 	}
-	__OnArgument("--osd-refresh") {
+	__OnArgument("--osd-refresh")
+	{
 		refresh_frequency_ms = atoi(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--osd-elements") {
+	__OnArgument("--osd-elements")
+	{
 		spdlog::warn("--osd-elements parameter is removed.");
-		char* elements = const_cast<char*> (__ArgValue);
+		char *elements = const_cast<char *>(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--osd-telem-lvl") {
+	__OnArgument("--osd-telem-lvl")
+	{
 		spdlog::warn("--osd-telem-lvl parameter is removed.");
 		continue;
 	}
 
-	__OnArgument("--osd-custom-message") {
+	__OnArgument("--osd-custom-message")
+	{
 		osd_custom_message = true;
 		continue;
 	}
 
-	__OnArgument("--screen-mode") {
-		char* mode = const_cast<char*>(__ArgValue);
+	__OnArgument("--screen-mode")
+	{
+		char *mode = const_cast<char *>(__ArgValue);
 		mode_width = atoi(strtok(mode, "x"));
 		mode_height = atoi(strtok(NULL, "@"));
 		mode_vrefresh = atoi(strtok(NULL, "@"));
 		continue;
 	}
 
-	__OnArgument("--disable-vsync") {
+	__OnArgument("--disable-vsync")
+	{
 		disable_vsync = true;
 		continue;
 	}
 
-	__OnArgument("--disable-gregidr") {
+	__OnArgument("--headless")
+	{
+		headless = true;
+		continue;
+	}
+
+	__OnArgument("--disable-gregidr")
+	{
 		disable_gregidr = true;
 		continue;
 	}
 
-	__OnArgument("--screen-mode-list") {
+	__OnArgument("--screen-mode-list")
+	{
 		print_modelist = 1;
 		continue;
 	}
 
-	__OnArgument("--live-colortrans") {
+	__OnArgument("--live-colortrans")
+	{
 		enable_live_colortrans = true;
 		continue;
 	}
 
-	__OnArgument("--wfb-api-port") {
+	__OnArgument("--wfb-api-port")
+	{
 		wfb_port = atoi(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--wfb-api-host") {
+	__OnArgument("--wfb-api-host")
+	{
 		wfb_api_host = const_cast<char *>(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--version") {
+	__OnArgument("--version")
+	{
 		printf("PixelPilot Rockchip %d.%d\n", APP_VERSION_MAJOR, APP_VERSION_MINOR);
 		return 0;
 	}
 
-	__OnArgument("--video-plane-id") {
+	__OnArgument("--video-plane-id")
+	{
 		video_plane_id_override = atoi(__ArgValue);
 		continue;
 	}
-	__OnArgument("--osd-plane-id") {
+	__OnArgument("--osd-plane-id")
+	{
 		osd_plane_id_override = atoi(__ArgValue);
 		continue;
 	}
 
-	__OnArgument("--video-scale") {
-    	video_scale_factor = atof(__ArgValue);
-    	if (video_scale_factor < 0.5 || video_scale_factor > 1.0) {
-        	fprintf(stderr, "Invalid video scale factor, should be (0.5 =< scale <= 1.0)\n");
-        	return -1;
-    	}
-    	continue;
+	__OnArgument("--video-scale")
+	{
+		video_scale_factor = atof(__ArgValue);
+		if (video_scale_factor < 0.5 || video_scale_factor > 1.0)
+		{
+			fprintf(stderr, "Invalid video scale factor, should be (0.5 =< scale <= 1.0)\n");
+			return -1;
+		}
+		continue;
 	}
 
 	__EndParseConsoleArguments__
 
-	spdlog::set_level(log_level);
+		spdlog::set_level(log_level);
 	idr_set_enabled(!disable_gregidr);
 
-	if (dvr_template != NULL && (dvr_mode == DVR_MODE_RAW || dvr_mode == DVR_MODE_BOTH) && video_framerate < 0) {
+	if (dvr_template != NULL && (dvr_mode == DVR_MODE_RAW || dvr_mode == DVR_MODE_BOTH) && video_framerate < 0)
+	{
 		printf("--dvr-framerate must be provided when raw DVR is enabled.\n"
-		       "Use --dvr-mode reencode with --dvr-reenc-fps for hardware re-encoding only.\n");
+			   "Use --dvr-mode reencode with --dvr-reenc-fps for hardware re-encoding only.\n");
 		return 0;
 	}
 
 	printf("PixelPilot Rockchip %d.%d\n", APP_VERSION_MAJOR, APP_VERSION_MINOR);
 
 	// Load yaml config
-	try {
+	try
+	{
 
 		// Set default config path if none specified
-		if (config_file_path == NULL) {
+		if (config_file_path == NULL)
+		{
 			config_file_path = strdup(DEFAULT_CONFIG_PATH);
 		}
-        config = YAML::LoadFile(config_file_path);
+		config = YAML::LoadFile(config_file_path);
 
 		// GSMENU settings
-		if (config["gsmenu"]) {
-            if (config["gsmenu"]["enabled"]) {
-                gsmenu_enabled = config["gsmenu"]["enabled"].as<bool>();
-            }
-		if (gsmenu_enabled && config["gsmenu"]["actions"]) {
-			if (config["gsmenu"]["actions"]["air"]) {
-				const YAML::Node& actionsNode = config["gsmenu"]["actions"]["air"];
-				airactions_count = 0;
-				
-				for (YAML::const_iterator it = actionsNode.begin(); 
-					it != actionsNode.end() && airactions_count < MAX_ACTIONS; 
-					++it) {
-					
-					std::string label = (*it)["label"].as<std::string>();
-					std::string cmd = (*it)["action"].as<std::string>();
-					
-					// Access the global array at the current index
-					strncpy(airactions[airactions_count].label, label.c_str(), MAX_LABEL_LEN - 1);
-					airactions[airactions_count].label[MAX_LABEL_LEN - 1] = '\0';
-					
-					strncpy(airactions[airactions_count].action, cmd.c_str(), MAX_ACTION_LEN - 1);
-					airactions[airactions_count].action[MAX_ACTION_LEN - 1] = '\0';
-					
-					airactions_count++;
-				}
-				spdlog::debug("Parsed {} GS Actions", airactions_count);
+		if (config["gsmenu"])
+		{
+			if (config["gsmenu"]["enabled"])
+			{
+				gsmenu_enabled = config["gsmenu"]["enabled"].as<bool>();
 			}
-			if (config["gsmenu"]["actions"]["ground"]) {
-				const YAML::Node& actionsNode = config["gsmenu"]["actions"]["ground"];
-				gsactions_count = 0;
-				
-				for (YAML::const_iterator it = actionsNode.begin(); 
-					it != actionsNode.end() && gsactions_count < MAX_ACTIONS; 
-					++it) {
-					
-					std::string label = (*it)["label"].as<std::string>();
-					std::string cmd = (*it)["action"].as<std::string>();
-					
-					// Access the global array at the current index
-					strncpy(gsactions[gsactions_count].label, label.c_str(), MAX_LABEL_LEN - 1);
-					gsactions[gsactions_count].label[MAX_LABEL_LEN - 1] = '\0';
-					
-					strncpy(gsactions[gsactions_count].action, cmd.c_str(), MAX_ACTION_LEN - 1);
-					gsactions[gsactions_count].action[MAX_ACTION_LEN - 1] = '\0';
-					
-					gsactions_count++;
+			if (gsmenu_enabled && config["gsmenu"]["actions"])
+			{
+				if (config["gsmenu"]["actions"]["air"])
+				{
+					const YAML::Node &actionsNode = config["gsmenu"]["actions"]["air"];
+					airactions_count = 0;
+
+					for (YAML::const_iterator it = actionsNode.begin();
+						 it != actionsNode.end() && airactions_count < MAX_ACTIONS;
+						 ++it)
+					{
+
+						std::string label = (*it)["label"].as<std::string>();
+						std::string cmd = (*it)["action"].as<std::string>();
+
+						// Access the global array at the current index
+						strncpy(airactions[airactions_count].label, label.c_str(), MAX_LABEL_LEN - 1);
+						airactions[airactions_count].label[MAX_LABEL_LEN - 1] = '\0';
+
+						strncpy(airactions[airactions_count].action, cmd.c_str(), MAX_ACTION_LEN - 1);
+						airactions[airactions_count].action[MAX_ACTION_LEN - 1] = '\0';
+
+						airactions_count++;
+					}
+					spdlog::debug("Parsed {} GS Actions", airactions_count);
 				}
-				spdlog::debug("Parsed {} GS Actions", gsactions_count);
+				if (config["gsmenu"]["actions"]["ground"])
+				{
+					const YAML::Node &actionsNode = config["gsmenu"]["actions"]["ground"];
+					gsactions_count = 0;
+
+					for (YAML::const_iterator it = actionsNode.begin();
+						 it != actionsNode.end() && gsactions_count < MAX_ACTIONS;
+						 ++it)
+					{
+
+						std::string label = (*it)["label"].as<std::string>();
+						std::string cmd = (*it)["action"].as<std::string>();
+
+						// Access the global array at the current index
+						strncpy(gsactions[gsactions_count].label, label.c_str(), MAX_LABEL_LEN - 1);
+						gsactions[gsactions_count].label[MAX_LABEL_LEN - 1] = '\0';
+
+						strncpy(gsactions[gsactions_count].action, cmd.c_str(), MAX_ACTION_LEN - 1);
+						gsactions[gsactions_count].action[MAX_ACTION_LEN - 1] = '\0';
+
+						gsactions_count++;
+					}
+					spdlog::debug("Parsed {} GS Actions", gsactions_count);
+				}
 			}
-		}
 		}
 
-		if (config["restream"] && config["restream"]["manual_ip"]) {
+		if (config["restream"] && config["restream"]["manual_ip"])
+		{
 			std::string ip = config["restream"]["manual_ip"].as<std::string>();
 			restream_set_pinned_ip(ip.c_str());
 		}
 
 		// USB webcam (UVC) settings. Values seed the globals; the pipeline is
 		// actually brought up later (after DRM/threads) if enabled here.
-		if (config["webcam"] && config["webcam"].IsMap()) {
+		if (config["webcam"] && config["webcam"].IsMap())
+		{
 			auto wc = config["webcam"];
-			if (wc["resolution"]) {
+			if (wc["resolution"])
+			{
 				std::string r = wc["resolution"].as<std::string>();
 				webcam_params.resolution = (r == "1080p") ? EncResolution::Res1080p
-				                                           : EncResolution::Res720p;
+														  : EncResolution::Res720p;
 			}
-			if (wc["fps"])     webcam_params.fps     = wc["fps"].as<int>();
-			if (wc["quality"]) webcam_params.quality = wc["quality"].as<int>();
-			if (wc["osd"])     webcam_osd            = wc["osd"].as<bool>();
-			if (wc["enabled"]) webcam_autostart      = wc["enabled"].as<bool>();
+			if (wc["fps"])
+				webcam_params.fps = wc["fps"].as<int>();
+			if (wc["quality"])
+				webcam_params.quality = wc["quality"].as<int>();
+			if (wc["osd"])
+				webcam_osd = wc["osd"].as<bool>();
+			if (wc["enabled"])
+				webcam_autostart = wc["enabled"].as<bool>();
 		}
 
-		if (config["os_sensors"] && config["os_sensors"].IsMap()) {
-			if (config["os_sensors"]["cpu"]) {
+		if (config["os_sensors"] && config["os_sensors"].IsMap())
+		{
+			if (config["os_sensors"]["cpu"])
+			{
 				auto cpu = config["os_sensors"]["cpu"];
-				if(cpu.IsScalar() && cpu.as<std::string>() == "auto") {
+				if (cpu.IsScalar() && cpu.as<std::string>() == "auto")
+				{
 					os_sensors.discoverCPU();
-				} else {
+				}
+				else
+				{
 					os_sensors.addCPU();
 				}
 			}
-			if (config["os_sensors"]["power"]) {
+			if (config["os_sensors"]["power"])
+			{
 				auto power = config["os_sensors"]["power"];
-				if(power.IsScalar() && power.as<std::string>() == "auto") {
+				if (power.IsScalar() && power.as<std::string>() == "auto")
+				{
 					os_sensors.discoverPower();
-				} else {
-					for (const auto& power_sensor : power) {
+				}
+				else
+				{
+					for (const auto &power_sensor : power)
+					{
 						std::string type = power_sensor["type"].as<std::string>();
 						std::string hwmon_id = power_sensor["hwmon_id"].as<std::string>();
 						os_sensors.addPower(type, hwmon_id);
 					}
 				}
 			}
-			if (config["os_sensors"]["temperature"]) {
+			if (config["os_sensors"]["temperature"])
+			{
 				auto temperature = config["os_sensors"]["temperature"];
-				if(temperature.IsScalar() && temperature.as<std::string>() == "auto") {
+				if (temperature.IsScalar() && temperature.as<std::string>() == "auto")
+				{
 					os_sensors.discoverTemperature();
-				} else {
-					for (const auto& temp_sensor : temperature) {
+				}
+				else
+				{
+					for (const auto &temp_sensor : temperature)
+					{
 						std::string thermal_zone = temp_sensor["thermal_zone"].as<std::string>();
 						os_sensors.addTemperature(thermal_zone);
 					}
 				}
 			}
-		} else {
+		}
+		else
+		{
 			spdlog::error("Unexpected format of config file 'os_sensors'!");
 		}
-
-	} catch (const YAML::BadFile& e) {
+	}
+	catch (const YAML::BadFile &e)
+	{
 		std::cout << "Configuration file " << config_file_path << " not found." << std::endl;
-	} catch (const YAML::ParserException& e) {
+	}
+	catch (const YAML::ParserException &e)
+	{
 		std::cerr << "Error parsing configuration: " << e.what() << std::endl;
-	} catch (const YAML::Exception& e) {
+	}
+	catch (const YAML::Exception &e)
+	{
 		std::cerr << "Configuration error: " << e.what() << std::endl;
 	}
 
 	spdlog::info("disable_vsync: {}", disable_vsync);
 
-	if (enable_osd == 0 ) {
+	if (enable_osd == 0)
+	{
 		video_zpos = 4;
 	}
-	
+
 	MppCodingType mpp_type = MPP_VIDEO_CodingHEVC;
-	if(codec==VideoCodec::H264) {
+	if (codec == VideoCodec::H264)
+	{
 		mpp_type = MPP_VIDEO_CodingAVC;
 	}
 	current_mpp_type = mpp_type;
-	stream_mpp_type  = mpp_type;
+	stream_mpp_type = mpp_type;
 	ret = mpp_check_support_format(MPP_CTX_DEC, mpp_type);
 	assert(!ret);
-	
+
 	//////////////////////////////////  DRM SETUP
-	ret = modeset_open(&drm_fd, "/dev/dri/card0");
-	if (ret < 0) {
-		spdlog::warn("modeset_open() =  {}", ret);
+	if (headless)
+	{
+		spdlog::warn("Running in headless mode: skipping DRM/HDMI display setup. "
+					 "Local video, OSD and DVR are disabled; the RTP stream is still "
+					 "received and restreamed to the tethered phone.");
 	}
-	assert(drm_fd >= 0);
-	if (print_modelist) {
-		modeset_print_modes(drm_fd);
-		close(drm_fd);
-		return 0;
-	}
+	else
+	{
+		ret = modeset_open(&drm_fd, "/dev/dri/card0");
+		if (ret < 0)
+		{
+			spdlog::warn("modeset_open() =  {}", ret);
+		}
+		assert(drm_fd >= 0);
+		if (print_modelist)
+		{
+			modeset_print_modes(drm_fd);
+			close(drm_fd);
+			return 0;
+		}
 
-	output_list = modeset_prepare(drm_fd, mode_width, mode_height, mode_vrefresh, video_plane_id_override, osd_plane_id_override, video_scale_factor);
-	if (!output_list) {
-		fprintf(stderr,
-				"cannot initialize display. Is display connected? Is --screen-mode correct?\n");
-		return -2;
-	}
+		output_list = modeset_prepare(drm_fd, mode_width, mode_height, mode_vrefresh, video_plane_id_override, osd_plane_id_override, video_scale_factor);
+		if (!output_list)
+		{
+			fprintf(stderr,
+					"cannot initialize display. Is display connected? Is --screen-mode correct?\n");
+			return -2;
+		}
 
-	gamma_lut_controller_init(&lut_ctrl, drm_fd, output_list);
+		gamma_lut_controller_init(&lut_ctrl, drm_fd, output_list);
 
-	if (enable_live_colortrans) {
-		if (gamma_lut_enable(&lut_ctrl, live_colortrans_offset, live_colortrans_gain)) {
-			spdlog::info("Gamma LUT enabled with offset={}, gain={}", live_colortrans_offset, live_colortrans_gain);
+		if (enable_live_colortrans)
+		{
+			if (gamma_lut_enable(&lut_ctrl, live_colortrans_offset, live_colortrans_gain))
+			{
+				spdlog::info("Gamma LUT enabled with offset={}, gain={}", live_colortrans_offset, live_colortrans_gain);
+			}
 		}
 	}
-	
+
 	////////////////////////////////// MPI SETUP
-	MppPacket packet;
+	MppPacket packet = NULL;
+	uint8_t *nal_buffer = NULL;
 
-	uint8_t* nal_buffer = (uint8_t*)malloc(1024 * 1024);
-	assert(nal_buffer);
-	ret = mpp_packet_init(&packet, nal_buffer, READ_BUF_SIZE);
-	assert(!ret);
+	if (!headless)
+	{
+		nal_buffer = (uint8_t *)malloc(1024 * 1024);
+		assert(nal_buffer);
+		ret = mpp_packet_init(&packet, nal_buffer, READ_BUF_SIZE);
+		assert(!ret);
 
-	ret = mpp_create(&mpi.ctx, &mpi.mpi);
-	assert(!ret);
-    set_mpp_decoding_parameters(mpi.mpi,mpi.ctx);
-	ret = mpp_init(mpi.ctx, MPP_CTX_DEC, mpp_type);
-    assert(!ret);
-    set_mpp_decoding_parameters(mpi.mpi,mpi.ctx);
+		ret = mpp_create(&mpi.ctx, &mpi.mpi);
+		assert(!ret);
+		set_mpp_decoding_parameters(mpi.mpi, mpi.ctx);
+		ret = mpp_init(mpi.ctx, MPP_CTX_DEC, mpp_type);
+		assert(!ret);
+		set_mpp_decoding_parameters(mpi.mpi, mpi.ctx);
 
-	// blocked/wait read of frame in thread
-	int param = MPP_POLL_BLOCK;
-	ret = mpi.mpi->control(mpi.ctx, MPP_SET_OUTPUT_BLOCK, &param);
-	assert(!ret);
-
+		// blocked/wait read of frame in thread
+		int param = MPP_POLL_BLOCK;
+		ret = mpi.mpi->control(mpi.ctx, MPP_SET_OUTPUT_BLOCK, &param);
+		assert(!ret);
+	}
 
 	////////////////////////////////// SIGNAL SETUP
 
 	signal(SIGINT, sig_handler);
 	signal(SIGPIPE, sig_handler);
-	if (dvr_template) {
+	if (dvr_template)
+	{
 		signal(SIGUSR1, sigusr1_handler);
 	}
 	signal(SIGUSR2, sigusr2_handler);
- 	//////////////////// THREADS SETUP
-	
+	//////////////////// THREADS SETUP
+
 	ret = pthread_mutex_init(&video_mutex, NULL);
 	assert(!ret);
 	ret = pthread_cond_init(&video_cond, NULL);
 	assert(!ret);
 
 	pthread_t tid_frame, tid_display, tid_osd, tid_mavlink, tid_wfbcli;
-	if (dvr_template != NULL) {
-		bool has_raw   = (dvr_mode == DVR_MODE_RAW || dvr_mode == DVR_MODE_BOTH);
-		bool has_reenc = (dvr_mode == DVR_MODE_REENCODE || dvr_mode == DVR_MODE_BOTH);
-		bool both      = (dvr_mode == DVR_MODE_BOTH);
+	if (!headless)
+	{
+		if (dvr_template != NULL)
+		{
+			bool has_raw = (dvr_mode == DVR_MODE_RAW || dvr_mode == DVR_MODE_BOTH);
+			bool has_reenc = (dvr_mode == DVR_MODE_REENCODE || dvr_mode == DVR_MODE_BOTH);
+			bool both = (dvr_mode == DVR_MODE_BOTH);
 
-		if (has_raw) {
-			dvr_thread_params args;
-			char *tpl = both ? dvr_template_with_suffix(dvr_template, "_raw") : dvr_template;
-			args.filename_template = tpl;
-			args.mp4_fragmentation_mode = mp4_fragmentation_mode;
-			args.dvr_filenames_with_sequence = dvr_filenames_with_sequence;
-			args.video_framerate = video_framerate;
-			args.max_file_size = dvr_max_file_size;
-			args.video_p.video_frm_width = output_list->video_frm_width;
-			args.video_p.video_frm_height = output_list->video_frm_height;
-			args.video_p.codec = codec;
-			dvr_raw = new Dvr(args);
-			ret = pthread_create(&g_tid_dvr_raw, NULL, &Dvr::__THREAD__, dvr_raw);
-			assert(!ret);
-		}
+			if (has_raw)
+			{
+				dvr_thread_params args;
+				char *tpl = both ? dvr_template_with_suffix(dvr_template, "_raw") : dvr_template;
+				args.filename_template = tpl;
+				args.mp4_fragmentation_mode = mp4_fragmentation_mode;
+				args.dvr_filenames_with_sequence = dvr_filenames_with_sequence;
+				args.video_framerate = video_framerate;
+				args.max_file_size = dvr_max_file_size;
+				args.video_p.video_frm_width = output_list->video_frm_width;
+				args.video_p.video_frm_height = output_list->video_frm_height;
+				args.video_p.codec = codec;
+				dvr_raw = new Dvr(args);
+				ret = pthread_create(&g_tid_dvr_raw, NULL, &Dvr::__THREAD__, dvr_raw);
+				assert(!ret);
+			}
 
-		if (has_reenc) {
-			dvr_thread_params args;
-			char *tpl = both ? dvr_template_with_suffix(dvr_template, "_reenc") : dvr_template;
-			args.filename_template = tpl;
-			args.mp4_fragmentation_mode = mp4_fragmentation_mode;
-			args.dvr_filenames_with_sequence = dvr_filenames_with_sequence;
-			args.video_framerate = reenc_params.fps;
-			args.max_file_size = dvr_max_file_size;
-			uint32_t rw, rh; reenc_target_dims(rw, rh);
-			args.video_p.video_frm_width = rw;
-			args.video_p.video_frm_height = rh;
-			args.video_p.codec = reenc_params.codec;
-			dvr_reenc_inst = new Dvr(args);
-			ret = pthread_create(&g_tid_dvr_reenc, NULL, &Dvr::__THREAD__, dvr_reenc_inst);
-			assert(!ret);
+			if (has_reenc)
+			{
+				dvr_thread_params args;
+				char *tpl = both ? dvr_template_with_suffix(dvr_template, "_reenc") : dvr_template;
+				args.filename_template = tpl;
+				args.mp4_fragmentation_mode = mp4_fragmentation_mode;
+				args.dvr_filenames_with_sequence = dvr_filenames_with_sequence;
+				args.video_framerate = reenc_params.fps;
+				args.max_file_size = dvr_max_file_size;
+				uint32_t rw, rh;
+				reenc_target_dims(rw, rh);
+				args.video_p.video_frm_width = rw;
+				args.video_p.video_frm_height = rh;
+				args.video_p.codec = reenc_params.codec;
+				dvr_reenc_inst = new Dvr(args);
+				ret = pthread_create(&g_tid_dvr_reenc, NULL, &Dvr::__THREAD__, dvr_reenc_inst);
+				assert(!ret);
 
-			reencoder = new MppEncoder(reenc_params, [](std::shared_ptr<std::vector<uint8_t>> nal) {
+				reencoder = new MppEncoder(reenc_params, [](std::shared_ptr<std::vector<uint8_t>> nal)
+										   {
 				if (dvr_enabled && dvr_reenc_inst != NULL) {
 					dvr_reenc_inst->frame(nal);
+				} });
+				ret = pthread_create(&g_tid_enc, NULL, &MppEncoder::__THREAD__, reencoder);
+				assert(!ret);
+				frame_proc = new FrameProcessor(reencoder, reenc_params.fps, reenc_params.resolution, drm_fd);
+				if (enable_live_colortrans)
+				{
+					frame_proc->set_color_correction(live_colortrans_gain,
+													 live_colortrans_offset, drm_fd);
+					spdlog::info("Encoder color correction enabled: gain={} offset={}",
+								 live_colortrans_gain, live_colortrans_offset);
 				}
-			});
-			ret = pthread_create(&g_tid_enc, NULL, &MppEncoder::__THREAD__, reencoder);
-			assert(!ret);
-			frame_proc = new FrameProcessor(reencoder, reenc_params.fps, reenc_params.resolution, drm_fd);
-			if (enable_live_colortrans) {
-				frame_proc->set_color_correction(live_colortrans_gain,
-				                                live_colortrans_offset, drm_fd);
-				spdlog::info("Encoder color correction enabled: gain={} offset={}",
-				             live_colortrans_gain, live_colortrans_offset);
+				ret = pthread_create(&g_tid_fproc, NULL, &FrameProcessor::__THREAD__, frame_proc);
+				assert(!ret);
+				dvr_reenc_inst->on_start_cb = []()
+				{
+					if (reencoder)
+						reencoder->request_idr();
+				};
+				spdlog::info("Re-encoding recorder: codec={} fps={} bitrate={}kbps",
+							 reenc_params.codec == VideoCodec::H265 ? "h265" : "h264",
+							 reenc_params.fps, reenc_params.bitrate_kbps);
 			}
-			ret = pthread_create(&g_tid_fproc, NULL, &FrameProcessor::__THREAD__, frame_proc);
-			assert(!ret);
-			dvr_reenc_inst->on_start_cb = []() {
-				if (reencoder) reencoder->request_idr();
-			};
-			spdlog::info("Re-encoding recorder: codec={} fps={} bitrate={}kbps",
-			             reenc_params.codec == VideoCodec::H265 ? "h265" : "h264",
-			             reenc_params.fps, reenc_params.bitrate_kbps);
-		}
 
-		if (dvr_autostart) {
-			dvr_enabled = 1;
-			osd_publish_bool_fact("dvr.recording", NULL, 0, true);
-			if (dvr_raw) dvr_raw->start_recording();
-			if (dvr_reenc_inst) dvr_reenc_inst->start_recording();
-			if (reencoder) reencoder->request_idr();
+			if (dvr_autostart)
+			{
+				dvr_enabled = 1;
+				osd_publish_bool_fact("dvr.recording", NULL, 0, true);
+				if (dvr_raw)
+					dvr_raw->start_recording();
+				if (dvr_reenc_inst)
+					dvr_reenc_inst->start_recording();
+				if (reencoder)
+					reencoder->request_idr();
+			}
 		}
-	}
-	ret = pthread_create(&tid_frame, NULL, __FRAME_THREAD__, NULL);
-	assert(!ret);
-	ret = pthread_create(&tid_display, NULL, __DISPLAY_THREAD__, NULL);
-	assert(!ret);
-	// Bring the webcam up now that DRM + decode/display threads are live.
-	if (webcam_autostart) {
-		webcam_set_enabled(1);
-	}
-	if (enable_osd) {
-		nlohmann::json osd_config;
-		if(osd_config_path != "") {
-			std::ifstream f(osd_config_path);
-			osd_config = nlohmann::json::parse(f);
-		} else {
-			osd_config = {};
-		}
-		if (mavlink_thread) {
-			ret = pthread_create(&tid_mavlink, NULL, __MAVLINK_THREAD__, &signal_flag);
-			assert(!ret);
-		}
-		if (wfb_port) {
-			wfb_thread_params *wfb_args = (wfb_thread_params *)malloc(sizeof *wfb_args);
-			wfb_args->port = wfb_port;
-			wfb_args->host = wfb_api_host;
-			ret = pthread_create(&tid_wfbcli, NULL, __WFB_CLI_THREAD__, wfb_args);
-			assert(!ret);
-		}
-
-		osd_thread_params *args = (osd_thread_params *)malloc(sizeof *args);
-        args->fd = drm_fd;
-        args->out = output_list;
-		args->config = osd_config;
-		ret = pthread_create(&tid_osd, NULL, __OSD_THREAD__, args);
+		ret = pthread_create(&tid_frame, NULL, __FRAME_THREAD__, NULL);
 		assert(!ret);
-	}
+		ret = pthread_create(&tid_display, NULL, __DISPLAY_THREAD__, NULL);
+		assert(!ret);
+		// Bring the webcam up now that DRM + decode/display threads are live.
+		if (webcam_autostart)
+		{
+			webcam_set_enabled(1);
+		}
+		if (enable_osd)
+		{
+			nlohmann::json osd_config;
+			if (osd_config_path != "")
+			{
+				std::ifstream f(osd_config_path);
+				osd_config = nlohmann::json::parse(f);
+			}
+			else
+			{
+				osd_config = {};
+			}
+			if (mavlink_thread)
+			{
+				ret = pthread_create(&tid_mavlink, NULL, __MAVLINK_THREAD__, &signal_flag);
+				assert(!ret);
+			}
+			if (wfb_port)
+			{
+				wfb_thread_params *wfb_args = (wfb_thread_params *)malloc(sizeof *wfb_args);
+				wfb_args->port = wfb_port;
+				wfb_args->host = wfb_api_host;
+				ret = pthread_create(&tid_wfbcli, NULL, __WFB_CLI_THREAD__, wfb_args);
+				assert(!ret);
+			}
+
+			osd_thread_params *args = (osd_thread_params *)malloc(sizeof *args);
+			args->fd = drm_fd;
+			args->out = output_list;
+			args->config = osd_config;
+			ret = pthread_create(&tid_osd, NULL, __OSD_THREAD__, args);
+			assert(!ret);
+		}
+	} // if (!headless)
 
 	////////////////////////////////////////////// MAIN LOOP
-    read_gstreamerpipe_stream((void**)packet, listen_port, unix_socket, codec);
+	read_gstreamerpipe_stream((void **)packet, listen_port, unix_socket, codec);
 
 	////////////////////////////////////////////// MPI CLEANUP
 
-	ret = pthread_join(tid_frame, NULL);
-	assert(!ret);
-	
-	ret = pthread_mutex_lock(&video_mutex);
-	assert(!ret);	
-	ret = pthread_cond_signal(&video_cond);
-	assert(!ret);	
-	ret = pthread_mutex_unlock(&video_mutex);
-	assert(!ret);	
-
-	ret = pthread_join(tid_display, NULL);
-	assert(!ret);	
-	
-	ret = pthread_cond_destroy(&video_cond);
-	assert(!ret);
-	ret = pthread_mutex_destroy(&video_mutex);
-	assert(!ret);
-
-	if (mavlink_thread) {
-		ret = pthread_join(tid_mavlink, NULL);
+	if (!headless)
+	{
+		ret = pthread_join(tid_frame, NULL);
 		assert(!ret);
-        }
-	if (enable_osd) {
-		if (wfb_port) {
-			ret = pthread_join(tid_wfbcli, NULL);
-			assert(!ret);
-		}
-		ret = pthread_join(tid_osd, NULL);
+
+		ret = pthread_mutex_lock(&video_mutex);
 		assert(!ret);
-	}
-	if (dvr_template != NULL) {
-		if (g_tid_fproc) {
-			ret = pthread_join(g_tid_fproc, NULL);
-			assert(!ret);
-		}
-		if (g_tid_enc) {
-			ret = pthread_join(g_tid_enc, NULL);
-			assert(!ret);
-		}
-		if (g_tid_dvr_raw) {
-			ret = pthread_join(g_tid_dvr_raw, NULL);
-			assert(!ret);
-		}
-		if (g_tid_dvr_reenc) {
-			ret = pthread_join(g_tid_dvr_reenc, NULL);
-			assert(!ret);
-		}
-	}
-
-	ret = mpi.mpi->reset(mpi.ctx);
-	assert(!ret);
-
-	if (mpi.frm_grp) {
-		ret = mpp_buffer_group_put(mpi.frm_grp);
+		ret = pthread_cond_signal(&video_cond);
 		assert(!ret);
-		mpi.frm_grp = NULL;
-		for (i=0; i<MAX_FRAMES; i++) {
-			ret = drmModeRmFB(drm_fd, mpi.frame_to_drm[i].fb_id);
-			assert(!ret);
-			struct drm_mode_destroy_dumb dmdd;
-			memset(&dmdd, 0, sizeof(dmdd));
-			dmdd.handle = mpi.frame_to_drm[i].handle;
-			do {
-				ret = ioctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmdd);
-			} while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+		ret = pthread_mutex_unlock(&video_mutex);
+		assert(!ret);
+
+		ret = pthread_join(tid_display, NULL);
+		assert(!ret);
+
+		ret = pthread_cond_destroy(&video_cond);
+		assert(!ret);
+		ret = pthread_mutex_destroy(&video_mutex);
+		assert(!ret);
+
+		if (mavlink_thread)
+		{
+			ret = pthread_join(tid_mavlink, NULL);
 			assert(!ret);
 		}
-	}
-		
-	mpp_packet_deinit(&packet);
-	mpp_destroy(mpi.ctx);
-	free(nal_buffer);
-	
-	////////////////////////////////////////////// DRM CLEANUP
-	restore_planes_zpos(drm_fd, output_list);
-	drmModeSetCrtc(drm_fd,
-			       output_list->saved_crtc->crtc_id,
-			       output_list->saved_crtc->buffer_id,
-			       output_list->saved_crtc->x,
-			       output_list->saved_crtc->y,
-			       &output_list->connector.id,
-			       1,
-			       &output_list->saved_crtc->mode);
-	drmModeFreeCrtc(output_list->saved_crtc);
-	drmModeAtomicFree(output_list->video_request);
-	drmModeAtomicFree(output_list->osd_request);
-	gamma_lut_cleanup(&lut_ctrl);
-	modeset_cleanup(drm_fd, output_list);
-	close(drm_fd);
+		if (enable_osd)
+		{
+			if (wfb_port)
+			{
+				ret = pthread_join(tid_wfbcli, NULL);
+				assert(!ret);
+			}
+			ret = pthread_join(tid_osd, NULL);
+			assert(!ret);
+		}
+		if (dvr_template != NULL)
+		{
+			if (g_tid_fproc)
+			{
+				ret = pthread_join(g_tid_fproc, NULL);
+				assert(!ret);
+			}
+			if (g_tid_enc)
+			{
+				ret = pthread_join(g_tid_enc, NULL);
+				assert(!ret);
+			}
+			if (g_tid_dvr_raw)
+			{
+				ret = pthread_join(g_tid_dvr_raw, NULL);
+				assert(!ret);
+			}
+			if (g_tid_dvr_reenc)
+			{
+				ret = pthread_join(g_tid_dvr_reenc, NULL);
+				assert(!ret);
+			}
+		}
 
-    remove(pidFilePath.c_str());
+		ret = mpi.mpi->reset(mpi.ctx);
+		assert(!ret);
+
+		if (mpi.frm_grp)
+		{
+			ret = mpp_buffer_group_put(mpi.frm_grp);
+			assert(!ret);
+			mpi.frm_grp = NULL;
+			for (i = 0; i < MAX_FRAMES; i++)
+			{
+				ret = drmModeRmFB(drm_fd, mpi.frame_to_drm[i].fb_id);
+				assert(!ret);
+				struct drm_mode_destroy_dumb dmdd;
+				memset(&dmdd, 0, sizeof(dmdd));
+				dmdd.handle = mpi.frame_to_drm[i].handle;
+				do
+				{
+					ret = ioctl(drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmdd);
+				} while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+				assert(!ret);
+			}
+		}
+
+		mpp_packet_deinit(&packet);
+		mpp_destroy(mpi.ctx);
+		free(nal_buffer);
+
+		////////////////////////////////////////////// DRM CLEANUP
+		restore_planes_zpos(drm_fd, output_list);
+		drmModeSetCrtc(drm_fd,
+					   output_list->saved_crtc->crtc_id,
+					   output_list->saved_crtc->buffer_id,
+					   output_list->saved_crtc->x,
+					   output_list->saved_crtc->y,
+					   &output_list->connector.id,
+					   1,
+					   &output_list->saved_crtc->mode);
+		drmModeFreeCrtc(output_list->saved_crtc);
+		drmModeAtomicFree(output_list->video_request);
+		drmModeAtomicFree(output_list->osd_request);
+		gamma_lut_cleanup(&lut_ctrl);
+		modeset_cleanup(drm_fd, output_list);
+		close(drm_fd);
+	} // if (!headless)
+
+	remove(pidFilePath.c_str());
 
 	restore_stdin();
 	return return_value;
